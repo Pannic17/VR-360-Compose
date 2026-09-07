@@ -1,0 +1,8 @@
+# Keep line endings stable: the repo stores LF, and no client rewrites it on checkout.
+# Mixed writes from shell heredocs and Python on Windows had already produced CRCRLF
+# in README.md before this was pinned.
+* text=auto eol=lf
+
+*.png binary
+*.mp4 binary
+*.exr binary
