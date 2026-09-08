@@ -10,7 +10,7 @@
 | ✅ | **P0** 现状固化 | rig 反解完成，验证工具入库 `tools/` |
 | ✅ | **P1** 单帧正确 + 来源目录抽象 | `vr-compose frame` 可用，指标 A PASS |
 | ✅ | **P2** 序列吞吐 + 直出 MP4 | `vr-compose sequence`：778 帧 8K 实跑 **2.10 s/帧**（22.3×，~26 min），196.9 Mbps，可续跑，产物合规，186 个测试全绿 |
-| ▶ | **P3** 收尾与母版 sink | **下一步**。取消语义验证、4k/h265/60fps 真实数据 smoke、PNG/EXR 母版 sink |
+| ▶ | **P3** 收尾与母版 sink | **进行中**。编码器内存与 64 GB 软上限、取消语义（已定位真实 Ctrl-C 缺陷）、4k/h265/60fps 真实数据 smoke、PNG/EXR 母版 sink |
 | | **P4** 画质（母版） | 各向异性滤波、极区多 tile 联合重建、线性光混合 |
 | ◇ | **可选** GPU 加速 | 未决定。warp 1.84 s → 估计 30–40 ms，778 帧从 ~26 min 到 ~3 min；代价 ~1 GB 依赖、仅 NVIDIA |
 | | P5–P7 / 运维 | 交付合规 / GUI / 打包 / 运维 |
@@ -69,7 +69,7 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 | P0 | rig 反解 + 验证工具 | ✅ 已完成（结论写入 AGENTS.md，脚本在 `tools/`） | — |
 | P1 | 单帧正确 + 来源目录抽象 | ✅ **已完成** —— median 0.68，113 个测试全过，无硬编码路径 | — |
 | P2 | 序列吞吐 + 直出 MP4 | ✅ **已完成** —— 8K 2.17 s/帧（21.5×），120 帧实测合规，续跑经测试 | — |
-| P3 | 收尾与母版 sink | 取消语义验证；4k/h265/60fps 真实数据 smoke；PNG 母版 sink | 1–2 天 |
+| P3 | 收尾与母版 sink | 编码器内存 + 64 GB 软上限；取消语义（真实 Ctrl-C 路径）；4k/h265/60fps 真实数据 smoke；PNG 母版 sink | 2–2.5 天 |
 | **可选** | GPU 加速（CuPy） | warp 1.84 s → 估计 30–40 ms；CPU 路径保留为逐字节基准；不在关键路径上 | 2–3 天，**未决定** |
 | P4 | 画质（母版） | 极区可量化改善；无可见接缝；线性光混合 | 3–5 天 |
 | P5 | 交付合规 | 24 种参数组合全部合规；球面元数据；色彩管线实验有结论 | 3–4 天 |
@@ -193,11 +193,11 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 | | 项 | 状态 |
 |---|---|---|
 | ✅ | 778 帧一次跑完（≤ 45 min、码率 ≤ 上限、产物合规） | **达标**：~26 min，2.10 s/帧（22.3×），全长平均 **196.9 Mbps ≤ 200**，`conformance: OK`，8 个采样帧几何门 PASS。120 帧时的 249.8 Mbps 确为短片段 VBV 超调 |
-| ✗ | **内存峰值 ≤ 8 GB** | **未达标**：x264 `threads=auto`（本机 48 线程）在 8K 上分配 **16 GB** 缓冲池，而编码器只用到 0.4 核。需给编码器线程设上限并实测（内存、吞吐、长分段确定性） |
+| ~~✗~~ | ~~内存峰值 ≤ 8 GB~~ | **判据已作废**（用户 2026-09-08 决定）：不设内存预算，**软上限 64 GB，超出只报 Warning，不报错、不中断**。已实测 x264 `threads=auto` 在 8K 上峰值 14.77 GiB，远在软上限内。剩下的工作（实测整机峰值、验证峰值与帧数无关、加软上限告警）移到 **P3 第 0 项** |
 | ✅ | 默认输出目录 = 程序所在目录 | `--out` 可省略，落在程序目录，文件名自动生成；测试覆盖 |
-| ✗ | 提交 | 等用户确认 |
+| ✅ | 提交 | `c2c508d`（P2 全部代码与文档） |
 
-取消语义、真实数据 smoke、PNG/EXR 母版 sink 三项按用户决定移到 **P3**。
+取消语义、真实数据 smoke、PNG/EXR 母版 sink 三项按用户决定移到 **P3**，内存一项同上。
 
 原计划保留如下，作为记录。
 
@@ -275,24 +275,164 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 
 ## P3 — 收尾与母版 sink
 
-从 P2 收尾清单移来的三项（用户决定），加上原计划里的母版输出。
+从 P2 收尾清单移来的四项（三项按用户决定，内存一项判据改写后并入），加上原计划里的母版输出。
+
+下面每张表都是 2026-09-08 在本机实测的，**复现脚本是本阶段的交付物之一**
+（按第 10 节约定，数字落进 AGENTS.md 时必须同时有一条命令能跑出来）。
+
+### 0. 编码器内存与 64 GB 软上限
+
+**判据变了**：不再要求 ≤ 8 GB。用户决定 **软上限 64 GB，超出只报 Warning，不报错也不中断**。
+
+8K h264 200 Mbps，走管线真实路径（stdin 喂 rgb24 + `EncodeSpec.video_args()` 原参数）喂 75 帧，
+采样 ffmpeg 进程的 `PeakWorkingSetSize`：
+
+| x264 参数 | 峰值 | 喂入速率 |
+|---|---|---|
+| 默认（`threads=auto` → 本机 48） | **14.77 GiB** | 4.99 fps |
+| `threads=16` | 7.94 GiB | 4.31 fps |
+| `threads=8` | 6.75 GiB | 3.04 fps |
+| `threads=4` | 6.28 GiB | 2.09 fps |
+| `sliced-threads=1:threads=16` | **5.81 GiB** | 4.90 fps |
+| `sliced-threads=1:threads=8` | 5.81 GiB | 3.26 fps |
+
+- 吃内存的是**帧级并行** —— 每个 frame thread 要自己持有 8K 的参考帧与半像素插值平面。
+  切成**片级并行**（`sliced-threads=1`）后内存与线程数解耦：8 与 16 线程都是 5.81 GiB。
+- `-filter_threads 1` 实测无效（6.75 → 6.76 GiB）：swscale 不是贡献者，别在这上面花时间。
+- **`sliced-threads` 不能当 `--deterministic` 的廉价替代品** —— 跑两遍比哈希，不一致。已排除。
+- **结论：默认保持 `threads=auto`，不动它。** 14.77 GiB 远在 64 GB 软上限内，而它同时是最快的一档；
+  为了省内存去换 2% 吞吐（4.99 → 4.90 fps）现在没有理由。`sliced-threads` 与线程上限做成
+  `--encoder-threads` 暴露出去，给内存紧的机器留一条路，默认不启用。
 
 **做什么**
 
-1. **取消语义**：Ctrl-C 后无 `.part` 残留、完成分段保留、重跑同一命令续上。测试已写
-   （`tests/test_pipeline.py::test_cancel_mid_segment_leaves_no_partial_and_resumes`），
-   要跑通，并在真实 8K 任务上手动中断一次验证。
-2. **真实数据 smoke**：`--size 4k`、`--codec h265`、`--fps 60` 各在 E:/22 上跑 30 帧，
-   `ffprobe` 逐项合规。4K 走另一张 LUT（4096×2048）和 level 5.1；h265 走 x265 6.2 Main tier。
-3. **PNG / EXR 母版 sink**：`sequence --out-format png` 输出无损母版序列（按文件存在续跑），
-   供 P4 画质比较与归档。EXR 依赖上游先出 16-bit，接口预留、暂不实现。
+1. 实测**整机峰值**（ffmpeg + Python 两侧同时采样）。Python 侧目前只有估算 ~2.5–3 GB
+   （843 MiB LUT + 354 MB colour + 118 MB weight + 两帧 tile 332 MB + 每 band gather 临时量约 880 MB）。
+2. 验证**峰值与总帧数无关**（原判据里唯一还有意义的部分）—— 长跑不能是缓慢泄漏。
+3. 加软上限告警：超过 64 GB 打 Warning 继续跑。
+4. `tools/encode_probe.py memory` 子命令复现上表；**x265 的峰值也要量**（第 2 项要真跑 h265，
+   x265 是另一套 `pools` / `frame-threads`）。数字进 AGENTS.md 第 5、8 节。
+
+### 1. 取消语义 —— 现有测试测不到真实 Ctrl-C 的形状
+
+`tests/test_pipeline.py::test_cancel_mid_segment_leaves_no_partial_and_resumes` **已经是绿的**，
+但它是在 progress 回调里抛 Python 异常来模拟取消。真实 Ctrl-C 在 Windows 上发给**整个控制台进程组**，
+分段的 ffmpeg 也会收到，所以真实次序是「ffmpeg 先死，Python 再发现」。把这个形状打在真管线上
+（跑到第 80 帧时 kill 掉当前分段的 ffmpeg）：
+
+```
+raised RuntimeError: 'ffmpeg exited early:\n'
+segments: ['out.0000.1-60.mp4']    # 完成的分段保留 ✓
+output exists: False                # 无 .part 残留 ✓
+```
+
+磁盘状态是对的，续跑没问题；**但异常类型错了**。`cli.py` 的 `except KeyboardInterrupt`
+（友好提示 + 退出码 130）不会执行，落到下一条 `except RuntimeError`，用户看到
+`SystemExit("ffmpeg exited early:\n")`、退出码 1、**而且消息是空的**
+（`_stderr()` 在进程被 kill 后读不到东西）。**取消与「编码器真的挂了」目前无法区分。**
+
+**做什么**
+
+1. **ffmpeg 放进自己的进程组**（Windows `CREATE_NEW_PROCESS_GROUP`），让控制台 Ctrl-C 只到 Python，
+   `abort()` 重新成为唯一杀 ffmpeg 的人。已验证该 flag 的效果：新进程组里的子进程对发给它的
+   `CTRL_C_EVENT` 完全无反应。
+   > 说明：非交互会话里无法模拟真键盘 Ctrl-C，所以「今天 ffmpeg 确实会收到」这半边是
+   > Windows 控制台语义 + 上面那个已复现的失败态推出来的，不是直接测到的。
+   > **真实 8K 任务上手动中断一次仍是验收步骤。**
+2. **取消变成一等结果**：装 SIGINT handler 置标志，主动收尾当前分段，抛专用的 `Cancelled`，
+   CLI 映射到 130 那条分支。
+3. **把取消和真故障分开**：取消挂起期间的 broken pipe 报成取消；用 drainer 线程持续抽 ffmpeg 的
+   stderr，消息才不会是空的（顺带消掉一个潜在死锁 —— 现在 stderr 只在最后读，
+   `-loglevel error` 只是让它暂时没发作）。
+4. `concat` 也写 `.part` 再改名，Ctrl-C 落在这里会在**输出旁边**留下 `<out>.mp4.part`，一起收掉。
+5. 新测试用「kill 掉分段的 ffmpeg」这个形状 —— 可自动化，且走的正是真实 Ctrl-C 的代码路径。
+
+### 2. 真实数据 smoke（4k / h265 / 60fps）
+
+**帧数要改**：`StreamInfo.i_intervals` 是由相邻 I 帧位置的差集算出来的，30 帧 @30fps 只有 1 个 I 帧
+→ `i_intervals == ()` → `conformance_problems` 里 `any(())` 是 `False`，**GOP 检查空过**。
+60 fps（GOP 120）更严重。改成 **130 帧 @30fps + `--segment-gops 1`**（3 个分段、2 个 I 间隔，
+GOP 与 concat 都真的被验到），60 fps 那组用 **250 帧**。8K 下每组约 4.5 min。
+
+**4K 走哪条路 —— 实测已完成，建议改路径（待用户确认）**
+
+ROADMAP 原文写「4K 走另一张 LUT（4096×2048）」，AGENTS.md 第 5 节写「4k 由 8k 母版 Lanczos 降采样得到」。
+两者矛盾，且不是接线方式之差：第 3 节实测 7680 **精确等于** tile 中心密度（21.33 px/度），
+4096 是 11.38 px/度，直接出 4K LUT 等于用**最近邻**在 1.875 倍过采样的源上点采样。
+
+真实帧 1656/1657 同时出两版（`A` = 直接 4096×2048 LUT，`B` = 8K 母版经 ffmpeg
+`scale=4096:2048:flags=lanczos`，即生产路径）：
+
+| 量 | 结果 | 说明 |
+|---|---|---|
+| PSNR(A, B) | **43.89 dB**（赤道 42.45 / 中纬 43.83 / 极区 48.00） | 这个选择的影响量级，与 4:2:0 那 4.3 dB 同级，远大于码率 100→200 Mbps 的 0.39 dB |
+| 升回 8K 后对母版 M 的 PSNR | 直接 41.84 dB / **Lanczos 44.36 dB**（**+2.52 dB**） | 各纬度带一致（+2.34 ~ +2.65 dB）。点采样丢掉的信息不可逆，任何升采样都补不回来 |
+| 亮度 mean \|Laplacian\| | 直接 4.44 / Lanczos 3.38（**直接多 31.3%**） | 折叠进通带的高频。**注意方向**：直接版高频多 31%，却把母版重建得差 2.5 dB —— 那 31% 不是细节，是走样 |
+| 相邻帧 mean 差（同样的场景运动） | 直接 2.919 / Lanczos 2.778（**直接多 5.1%**） | 多出来的是采样爬行，头显里就是闪烁 |
+| 直接 4K 的指标 A | median **0.67 / 0.68，门 PASS** | **几何门对走样完全无感** —— 它拿多个 tile 在同一采样点互比，走样在 tile 之间是相关的 |
+
+> 后两项（Laplacian、时域）不依赖 `B` 作参考，所以「用同族 Lanczos 升采样略微偏袒 B」这个疑虑
+> 不影响结论方向：四个量一致指向同一边。
+
+→ **建议**：4K 默认「8K 拼接 + 同一条 ffmpeg 命令里 Lanczos 下采样」（不多一遍、不多落盘），
+直接 4K LUT 只留作显式的快速预览档。代价是 4K 按 8K 的价钱渲染（LUT 20.9 M 条 → 73.6 M 条，
+warp 约贵 3.5×），778 帧约 28 min 对约 15 min。
+→ 代码上要把**母版尺寸（LUT/warp）与交付尺寸（编码器输出）分开** —— 现在 `EncodeSpec` 是同一对
+width/height。
+→ **4K 这组 smoke 不能只看 `conformance: OK` + 门 PASS**（门是瞎的），要带上上面这组对比。
+
+顺手验过 `select_level` 与 AGENTS.md 第 5 节逐项对齐（4K h264 30fps → 5.1、60fps → 5.2；
+4K h265 57/43 → 5.2 Main、28 → 5.1 Main；8K h265 → 6.2 Main），这部分不用动。
+
+h265 那组走默认模式：`--deterministic` 慢 7.7×，不适合当 smoke。
+
+### 3. PNG / EXR 母版 sink
+
+**不要把 `run_sequence` 撑大。** 把已验证的 decode → warp → 几何门 抽成迭代器，两个 sink 各自消费它，
+MP4 路径的字节就**可证明**没被碰过（指标 D 继续成立，现有测试一行不用改）：
+
+```python
+def iter_stitched(..., skip: Callable[[int], bool]) -> Iterator[Stitched]
+```
+
+- `skip` 在**提交预取之前**问，续跑时不会去解码 + warp 一个马上要跳过的帧。
+  MP4 路径的分段级跳过留在迭代器外面，那条路径完全不变。
+- `PngSink` 写 `<dir>/<stem>.<frame:04d>.png`，按文件存在续跑，**写 `.part` 再原子改名**
+  （和分段同一套纪律，否则中断的半个 PNG 会被当成写完的）。
+- `SequenceJob.__post_init__` 现在**强制** `.mp4` 后缀，PNG sink 的输出是目录 → 后缀检查搬进 MP4 sink。
+- `estimated_output_bytes()` 是按码率估的，PNG 要另一套：8K 约 28 MiB/帧（第 4 节），
+  778 帧 ≈ 21 GiB。这条路径上「提前拒绝」比 MP4 更重要。
+- 吞吐：PNG 编码 compress_level 6 是 2.77 s/帧、level 1 是 0.68 s（第 8 节），level 6 会**盖过**
+  1.9 s 的 warp 成为新瓶颈。写入放小线程池（Pillow 编码时释放 GIL —— **要测，不要假定**），
+  母版默认 level 1：它是给 P4 比画质用的中间产物，不是交付物。
+- 判据要说准：像素恒等由指标 D 保证；**字节**恒等还要求同一个 compress_level。
+- EXR 只留接口：`--out-format {mp4,png}`，给 `exr` 一条说明为什么不行的错误（源是 8-bit，
+  取决于第 11 节第 5 项的上游改造）。**现在不引 OpenEXR 依赖。**
+- `--out-format png` 时 `--codec/--bitrate/--fps/--segment-gops/--deterministic` 全部失去意义
+  → 显式报错而不是静默忽略（第 10 节约定：报错不猜）。
+
+### 顺序与工期
+
+| 顺序 | 项 | 工期 | 为什么在这个位置 |
+|---|---|---|---|
+| 1 | 编码器内存 + 软上限告警 | ½ 天 | smoke 必须用最终编码参数，否则合规结论要重跑 |
+| 2 | 取消语义 | ½ 天 | 代码 + 测试；手动 Ctrl-C 验收搭在第 3 项的长跑上，不额外占机器 |
+| 3 | smoke（含 4K 路径落地） | ½ 天，多半是机器时间 | |
+| 4 | PNG sink | 1 天 | 唯一的新增功能面，放最后 |
+
+合计 **2–2.5 天**。
 
 **完成判据**
 
-- 取消测试通过；真实任务手动 Ctrl-C 后重跑只补缺段。
-- 三种真实数据 smoke 全部 `conformance: OK`。
-- PNG 母版 sink 可用，单帧输出与 `frame` 命令逐字节一致。
-
+- `tools/encode_probe.py memory` 复现上表；整机峰值有实测数字，且**与总帧数无关**；
+  超 64 GB 只 Warning（有测试覆盖告警分支），x264 与 x265 都量过。
+- kill 掉分段 ffmpeg → 走取消路径、退出码 130、**分段目录和输出旁边**都无 `.part`、
+  完成分段保留、续跑跑完；外加真实 8K 任务上手动 Ctrl-C 一次。
+- 三组 smoke 全部 `conformance: OK`，且帧数足够让 GOP 检查非空过（≥ 3 个 I 帧）。
+- 4K 路径按实测结论定案；若走 8K + Lanczos，母版尺寸与交付尺寸在代码里分开。
+- PNG 母版 sink 可用：像素与 `frame` 命令恒等、同 compress_level 下字节恒等、按文件续跑、
+  空间不足拒绝启动、8K ≤ 2.5 s/帧（即没成为新瓶颈）。
+- `ruff check` + `ruff format --check` + `mypy --strict` + `pytest` 全绿。
 ---
 
 ## P4 — 画质（母版层）
@@ -466,7 +606,8 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 
 ## 下一步
 
-**P2 已完成**（8K 2.17 s/帧，21.5×），下一步是 **P3 收尾与母版 sink**（取消语义验证、真实数据 smoke、PNG/EXR sink），然后 **P4 画质**：各向异性重采样替换最近邻、
+**P2 已完成并提交**（`c2c508d`，8K 2.10 s/帧，22.3×），进行中的是 **P3 收尾与母版 sink**
+（编码器内存与 64 GB 软上限、取消语义、真实数据 smoke、PNG/EXR sink），然后 **P4 画质**：各向异性重采样替换最近邻、
 极区多 tile 联合重建、线性光混合、时域稳定性检查。P4 只动母版层，不碰编码；
 每一步都要先过指标 A（几何）和指标 D（`WarpPlan` 与 `stitch_bands` 逐字节一致，
 或者在有意换采样器时**同时**更新两者并重记基线）。
@@ -479,6 +620,9 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 
 需要用户拍板、且会影响后续阶段设计的（AGENTS.md 第 11 节）：
 
+0. **4K 走哪条路**（P3 第 2 项，实测已完成，等确认）：8K 母版 + Lanczos 降采样（建议）
+   还是直接 4096×2048 LUT。四个独立量一致指向前者，最硬的一条是「升回 8K 后对母版
+   +2.52 dB」，而直接版的高频反而多 31%（那是走样，不是细节）。
 1. **色彩范围** limited 还是 full（P5 的前提，建议 limited）。
 2. **GUI 除了最小可用集还要什么**（P6 的范围）—— 预览、批量队列、日志导出、记住上次设置？
 3. **后续项目会出现哪些装配**（决定 rig 注册表要预留多少）。
