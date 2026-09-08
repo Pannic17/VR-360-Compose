@@ -17,11 +17,34 @@ from tqdm import tqdm
 
 from vr_compose import __version__, encode, io, pipeline, verify
 from vr_compose import source as source_mod
-from vr_compose.rig import UnknownRigError, rig_for
+from vr_compose.rig import Rig, UnknownRigError, rig_for
 from vr_compose.stitch import DEFAULT_BAND_ROWS, stitch_frame
 from vr_compose.warp import DEFAULT_THREADS
 
-DEFAULT_WIDTH = 7680
+
+def _master_size(
+    chosen: source_mod.SourceSet, rig: Rig, size: str, stitch_at: str
+) -> tuple[int, int] | None:
+    """The size to stitch, or None to stitch straight at the delivery size.
+
+    `native` renders the panorama at the source's own sampling density and lets swscale
+    resample it down inside the encode -- measured 2.52 dB closer to the master than
+    warping straight to a smaller grid (ROADMAP P3). It is also what makes a 16K render
+    delivered at 8K work: the master follows the tiles, the delivery follows the spec.
+
+    None comes back when there is nothing to resample (native density *is* the delivery
+    size, the usual 1920-tile 8K case) or when the tiles are unusable, which
+    `run_sequence` reports properly.
+    """
+    if stitch_at == "delivery":
+        return None
+    tile = chosen.tile_size
+    if tile is None:
+        return None
+    width = rig.native_width(tile)
+    if width <= encode.SIZES[size][0]:
+        return None
+    return width, width // 2
 
 
 def _resolve_source(explicit: pathlib.Path | None) -> source_mod.SourceSet:
@@ -112,6 +135,11 @@ def cmd_frame(args: argparse.Namespace) -> int:
             f"{len(frames)} frames available, starting {near}..."
         )
 
+    tile = chosen.tile_size
+    if tile is None:
+        raise SystemExit("source tiles are not square or not uniform; cannot stitch")
+    width = args.width or rig.native_width(tile)
+
     indices = list(rig.unique_indices)
     print(f"source     : {chosen.root}  stem {chosen.stem!r}")
     print(f"rig        : {rig.name}, reading {len(indices)} of {rig.file_count} files")
@@ -119,11 +147,10 @@ def cmd_frame(args: argparse.Namespace) -> int:
     tiles = io.load_tiles(chosen, frame, indices, workers=args.decode_workers)
     decoded = time.time() - started
 
-    result = stitch_frame(tiles, rig, args.width, band_rows=args.band_rows)
+    result = stitch_frame(tiles, rig, width, band_rows=args.band_rows)
     elapsed = time.time() - started
-    height = args.width // 2
     print(
-        f"stitched   : frame {frame} at {args.width}x{height} in {elapsed:.1f} s "
+        f"stitched   : frame {frame} at {width}x{width // 2} in {elapsed:.1f} s "
         f"(decode {decoded:.1f} s), overlap {result.overlap_fraction:.1%}, "
         f"up to {result.max_contributors} tiles"
     )
@@ -153,6 +180,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             args.fps,
             preset=args.preset,
             deterministic=args.deterministic,
+            master=_master_size(chosen, rig, args.size, args.stitch_at),
         )
         job = pipeline.SequenceJob(
             source=chosen,
@@ -274,7 +302,12 @@ def build_parser() -> argparse.ArgumentParser:
     frame.add_argument(
         "--stem", default=None, help="which scene (file stem), when a directory has several"
     )
-    frame.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="output width (2:1)")
+    frame.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="output width (2:1); default: the source's native density (4x the tile)",
+    )
     frame.add_argument("--out", type=pathlib.Path, default=None, help="write the panorama here")
     frame.add_argument("--compress-level", type=int, default=6, choices=range(10))
     frame.add_argument("--band-rows", type=int, default=DEFAULT_BAND_ROWS)
@@ -302,6 +335,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence.add_argument("--fps", type=int, default=30, choices=(30, 60))
     sequence.add_argument("--preset", default="medium", help="x264/x265 preset; never ultrafast")
+    sequence.add_argument(
+        "--stitch-at",
+        choices=("native", "delivery"),
+        default="native",
+        help="'native' (default) stitches at the source's own density (4x the tile) and "
+        "lets the encoder resample down; 'delivery' warps straight to the output size -- "
+        "faster, but it point-samples an oversampled source and aliases. Preview only",
+    )
     sequence.add_argument(
         "--deterministic",
         action="store_true",

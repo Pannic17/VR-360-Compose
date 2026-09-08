@@ -82,6 +82,20 @@ def test_spec_rejects_bad_inputs() -> None:
         EncodeSpec(7680, 3840, "h264", 0, 30)
 
 
+def test_spec_rejects_an_impossible_master() -> None:
+    with pytest.raises(ValueError, match="2:1 too"):
+        EncodeSpec(4096, 2048, "h264", 50_000, 30, master=(7680, 3000))
+    with pytest.raises(ValueError, match="smaller than the delivery size"):
+        EncodeSpec(7680, 3840, "h264", 200_000, 30, master=(4096, 2048))
+
+
+def test_master_defaults_to_the_delivery_size() -> None:
+    """No master means the stitcher renders the delivered size, i.e. today's 8K path."""
+    spec = EncodeSpec.for_size("8k", "h264", "high", 30)
+    assert (spec.master_width, spec.master_height) == (7680, 3840)
+    assert not spec.downsamples
+
+
 def _joined(args: list[str]) -> str:
     return " ".join(args)
 
@@ -129,6 +143,37 @@ def test_input_args_describe_raw_rgb_on_stdin() -> None:
     args = _joined(EncodeSpec(4096, 2048, "h264", 50_000, 60).input_args())
     assert "-f rawvideo" in args and "-pix_fmt rgb24" in args
     assert "-s 4096x2048" in args and "-r 60" in args and args.endswith("-i -")
+
+
+def test_a_master_is_fed_whole_and_resampled_inside_the_encode() -> None:
+    """16K in, 8K out: stdin carries the master, one swscale pass delivers the spec size.
+
+    The resize must sit in the same `scale` filter as the range and matrix conversion --
+    a second scale would resample twice, and resizing after `format=yuv420p` would
+    decimate the chroma before averaging it.
+    """
+    spec = EncodeSpec.for_size("8k", "h264", "high", 30, master=(15360, 7680))
+    assert spec.downsamples and (spec.master_width, spec.master_height) == (15360, 7680)
+    assert "-s 15360x7680" in _joined(spec.input_args()), "the master goes in"
+    args = _joined(spec.video_args())
+    assert "scale=7680:3840:flags=lanczos:in_range=full" in args, "one pass, lanczos, then yuv"
+    assert args.count("scale=") == 1, "a second scale filter would resample twice"
+    assert args.index("scale=") < args.index("format=yuv420p"), "resize before chroma decimation"
+    # the level is the delivery size's, not the master's -- no level admits 16K at all
+    assert "-level:v 6.0" in args
+
+
+def test_the_4k_delivery_comes_off_the_8k_master() -> None:
+    """ROADMAP P3: warping straight to 4096x2048 aliases; resample the master instead."""
+    spec = EncodeSpec.for_size("4k", "h265", "high", 30, master=(7680, 3840))
+    assert "-s 7680x3840" in _joined(spec.input_args())
+    assert "scale=4096:2048:flags=lanczos" in _joined(spec.video_args())
+    assert "level-idc=5.2" in _joined(spec.video_args()), "the level follows the delivery size"
+
+
+def test_no_resize_filter_without_a_master() -> None:
+    args = _joined(EncodeSpec.for_size("8k", "h264", "high", 30).video_args())
+    assert "flags=lanczos" not in args and "scale=in_range=full" in args
 
 
 def test_describe_is_human_readable() -> None:
@@ -248,3 +293,13 @@ def test_segment_writer_rejects_wrong_frames_and_cleans_up(tmp_path: pathlib.Pat
         writer.write(np.zeros((32, 64, 4), np.uint8))
     writer.abort()
     assert not writer.partial.exists() and not writer.path.exists()
+
+
+@needs_ffmpeg
+def test_a_downsampling_writer_wants_masters_not_delivery_frames(tmp_path: pathlib.Path) -> None:
+    assert TOOLS is not None
+    spec = EncodeSpec(64, 32, "h264", 400, 30, master=(128, 64))
+    writer = encode.SegmentWriter(TOOLS, spec, tmp_path / "bad.mp4")
+    with pytest.raises(ValueError, match=r"frame must be \(64, 128, 3\)"):
+        writer.write(np.zeros((32, 64, 3), np.uint8))  # the delivery size, not the master's
+    writer.abort()

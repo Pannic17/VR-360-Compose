@@ -67,6 +67,24 @@ class Rig:
             raise ValueError(f"camera index must be 1..{self.file_count}, got {index}")
         return self.views[index - 1]
 
+    def native_width(self, tile_size: int) -> int:
+        """Equirect width whose pixel density equals the tile centre density.
+
+        A tile spans `fov_deg` in `tile_size` pixels, so `tile_size * 360 / fov_deg` is
+        the width at which the panorama samples the source neither more nor less finely
+        than it was rendered. For this rig that is 4x the tile: 1920 px / 90 deg =
+        7680 px / 360 deg = 21.33 px/deg, which AGENTS.md §3 records as an exact match
+        rather than a coincidence -- and it is the reason the 8K master is 7680 wide.
+
+        Stitching above this width invents detail; stitching below it point-samples an
+        oversampled source and aliases, which is why a smaller delivery size is produced
+        by resampling this master rather than by warping straight to it.
+        """
+        if tile_size < 1:
+            raise ValueError(f"tile size must be positive, got {tile_size}")
+        width = round(tile_size * 360.0 / self.fov_deg)
+        return width + (width % 2)  # even, so height = width / 2 stays whole
+
     @property
     def groups(self) -> tuple[tuple[int, ...], ...]:
         """File indices grouped by orientation, ordered by first appearance.

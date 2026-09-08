@@ -354,7 +354,7 @@ output exists: False                # 无 .part 残留 ✓
 60 fps（GOP 120）更严重。改成 **130 帧 @30fps + `--segment-gops 1`**（3 个分段、2 个 I 间隔，
 GOP 与 concat 都真的被验到），60 fps 那组用 **250 帧**。8K 下每组约 4.5 min。
 
-**4K 走哪条路 —— 实测已完成，建议改路径（待用户确认）**
+**4K 走哪条路 —— 已定案并实现：按母版拼接，编码时 Lanczos 重采样**
 
 ROADMAP 原文写「4K 走另一张 LUT（4096×2048）」，AGENTS.md 第 5 节写「4k 由 8k 母版 Lanczos 降采样得到」。
 两者矛盾，且不是接线方式之差：第 3 节实测 7680 **精确等于** tile 中心密度（21.33 px/度），
@@ -374,12 +374,24 @@ ROADMAP 原文写「4K 走另一张 LUT（4096×2048）」，AGENTS.md 第 5 节
 > 后两项（Laplacian、时域）不依赖 `B` 作参考，所以「用同族 Lanczos 升采样略微偏袒 B」这个疑虑
 > 不影响结论方向：四个量一致指向同一边。
 
-→ **建议**：4K 默认「8K 拼接 + 同一条 ffmpeg 命令里 Lanczos 下采样」（不多一遍、不多落盘），
-直接 4K LUT 只留作显式的快速预览档。代价是 4K 按 8K 的价钱渲染（LUT 20.9 M 条 → 73.6 M 条，
-warp 约贵 3.5×），778 帧约 28 min 对约 15 min。
-→ 代码上要把**母版尺寸（LUT/warp）与交付尺寸（编码器输出）分开** —— 现在 `EncodeSpec` 是同一对
-width/height。
-→ **4K 这组 smoke 不能只看 `conformance: OK` + 门 PASS**（门是瞎的），要带上上面这组对比。
+→ **已采纳并实现**（用户 2026-09-08 决定「采用你认为最好的」）：
+
+- **母版尺寸 = `Rig.native_width(tile_size)` = `tile_size × 360 / fov_deg`**（本 rig 即 4× tile），
+  跟着源走；**交付尺寸跟着规格走**。两者相等时（1920 的 tile 交 8K）什么都不重采样，
+  与 P2 验证过的产物逐字节相同；不等时由 swscale 在**同一个 scale 滤镜**里做
+  Lanczos + RGB→YUV + 4:2:0（分两个 scale 会重采样两次；放在 `format=yuv420p` 之后
+  会先把色度抽掉一半再平均）。母版**不落盘**。
+- `EncodeSpec.master` 是新增的那一个字段，`width/height` 继续是交付尺寸（等级、合规都按它算）。
+  warp / projection / verify **一行没动** —— 指标 D 与 P1 的几何仍然是基准。
+- `--stitch-at {native,delivery}`，默认 `native`；`delivery` 是直接 warp 到交付尺寸的快速预览档。
+- 代价：4K 按 8K 的价钱渲染（LUT 20.9 M 条 → 73.6 M 条），778 帧约 28 min 对约 15 min。
+- **顺带解决「16K 渲染、8K 交付」**（用户提出的将来场景）：3840 的 tile → 母版 15360×7680，
+  交付 7680×3840，同一条代码路径，不需要新概念。**16K 只能是母版** ——
+  H.264/HEVC 都没有等级容得下 15360×7680，`select_level` 会拒绝把它当交付尺寸。
+  代价在 warp：LUT 约 295 M 条、约 3.4 GiB，单帧约 7.6 s（8K 是 1.9 s），
+  778 帧约 1.6 小时，整机峰值估计约 27 GiB —— 都在 64 GB 软上限内，
+  但这是 GPU 加速真正开始值钱的地方。
+- **4K 这组 smoke 不能只看 `conformance: OK` + 门 PASS**（门是瞎的），要带上上面这组对比。
 
 顺手验过 `select_level` 与 AGENTS.md 第 5 节逐项对齐（4K h264 30fps → 5.1、60fps → 5.2；
 4K h265 57/43 → 5.2 Main、28 → 5.1 Main；8K h265 → 6.2 Main），这部分不用动。
@@ -620,9 +632,6 @@ def iter_stitched(..., skip: Callable[[int], bool]) -> Iterator[Stitched]
 
 需要用户拍板、且会影响后续阶段设计的（AGENTS.md 第 11 节）：
 
-0. **4K 走哪条路**（P3 第 2 项，实测已完成，等确认）：8K 母版 + Lanczos 降采样（建议）
-   还是直接 4096×2048 LUT。四个独立量一致指向前者，最硬的一条是「升回 8K 后对母版
-   +2.52 dB」，而直接版的高频反而多 31%（那是走样，不是细节）。
 1. **色彩范围** limited 还是 full（P5 的前提，建议 limited）。
 2. **GUI 除了最小可用集还要什么**（P6 的范围）—— 预览、批量队列、日志导出、记住上次设置？
 3. **后续项目会出现哪些装配**（决定 rig 注册表要预留多少）。

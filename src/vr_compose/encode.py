@@ -192,11 +192,26 @@ class EncodeSpec:
 
     width: int
     height: int
+    """The **delivery** size: what the file contains, and what the level is computed for."""
     codec: str
     bitrate_kbps: int
     fps: int
     preset: str = "medium"
     full_range: bool = False
+    master: tuple[int, int] | None = None
+    """The size the stitcher renders, when it differs from the delivery size.
+
+    The master is the panorama at the source's native sampling density
+    (:meth:`Rig.native_width`); the delivery size is what the spec asks for. When they
+    differ, swscale downsamples with Lanczos in the same pass as the RGB->YUV conversion,
+    so the master never touches the disk and only one resample happens.
+
+    Measured on real frames (ROADMAP P3): warping straight to 4096x2048 instead of
+    resampling the 7680x3840 master reconstructs the master 2.52 dB worse in every
+    latitude band, carries 31% more high-frequency energy (folded, not detail) and 5.1%
+    more frame-to-frame delta under identical scene motion. `None` means the stitcher
+    renders the delivery size directly -- correct only when that *is* the native density.
+    """
     deterministic: bool = False
     """Force a run-to-run reproducible bitstream, at a throughput cost.
 
@@ -221,12 +236,35 @@ class EncodeSpec:
             raise ValueError("fps and bitrate must be positive")
         if self.width != 2 * self.height:
             raise ValueError(f"equirect output must be 2:1, got {self.width}x{self.height}")
+        if self.master is not None:
+            master_width, master_height = self.master
+            if master_width != 2 * master_height:
+                raise ValueError(f"the master must be 2:1 too, got {master_width}x{master_height}")
+            if master_width < self.width:
+                raise ValueError(
+                    f"master {master_width}x{master_height} is smaller than the delivery size "
+                    f"{self.width}x{self.height}; upscaling a master invents detail. Stitch at "
+                    "the delivery size instead."
+                )
 
     @classmethod
     def for_size(cls, size: str, codec: str, ladder: str, fps: int, **kwargs: object) -> EncodeSpec:
         width, height = SIZES[size]
         kbps = BITRATES_KBPS[size][LADDER.index(ladder)]
         return cls(width, height, codec, kbps, fps, **kwargs)  # type: ignore[arg-type]
+
+    @property
+    def master_width(self) -> int:
+        """Width the stitcher renders -- the master's, or the delivery's if there is none."""
+        return self.master[0] if self.master else self.width
+
+    @property
+    def master_height(self) -> int:
+        return self.master[1] if self.master else self.height
+
+    @property
+    def downsamples(self) -> bool:
+        return (self.master_width, self.master_height) != (self.width, self.height)
 
     @property
     def gop(self) -> int:
@@ -257,7 +295,7 @@ class EncodeSpec:
             "-pix_fmt",
             "rgb24",
             "-s",
-            f"{self.width}x{self.height}",
+            f"{self.master_width}x{self.master_height}",
             "-r",
             str(self.fps),
             "-i",
@@ -270,8 +308,14 @@ class EncodeSpec:
         level, tier = self.level, self.tier
         # The RGB->YUV matrix is made explicit rather than left to swscale's default,
         # which is BT.601 and would silently disagree with the bt709 tags below.
+        #
+        # When a master is being delivered smaller, the resize rides in this same scale
+        # filter: one swscale pass does Lanczos, the range conversion, the BT.709 matrix
+        # and the 4:2:0 decimation together. Two passes would resample twice, and doing
+        # the resize after `format=yuv420p` would throw away half the chroma first.
+        resize = f"{self.width}:{self.height}:flags=lanczos:" if self.downsamples else ""
         vf = (
-            "scale=in_range=full"
+            f"scale={resize}in_range=full"
             f":out_range={'full' if self.full_range else 'limited'}"
             ":out_color_matrix=bt709,format=yuv420p"
         )
@@ -327,10 +371,11 @@ class EncodeSpec:
 
     def describe(self) -> str:
         tier = f" {self.tier} tier" if self.codec == "h265" else ""
+        source = f"{self.master_width}x{self.master_height} -> " if self.downsamples else ""
         return (
-            f"{self.codec} {self.width}x{self.height} @ {self.fps} fps, "
+            f"{self.codec} {source}{self.width}x{self.height} @ {self.fps} fps, "
             f"{self.bitrate_kbps / 1000:g} Mbps, level {self.level}{tier}, GOP {self.gop}, "
-            f"preset {self.preset}"
+            f"preset {self.preset}" + (", lanczos downsample" if self.downsamples else "")
         )
 
 
@@ -447,7 +492,6 @@ class SegmentWriter:
         self.path = path
         self.partial = path.with_name(path.name + ".part")
         self.frames = 0
-        self._frame_bytes = spec.width * spec.height * 3
         path.parent.mkdir(parents=True, exist_ok=True)
         self.partial.unlink(missing_ok=True)
         self._process: subprocess.Popen[bytes] = subprocess.Popen(
@@ -475,11 +519,10 @@ class SegmentWriter:
         )
 
     def write(self, frame: U8) -> None:
-        if frame.shape != (self.spec.height, self.spec.width, 3) or frame.dtype != np.uint8:
-            raise ValueError(
-                f"frame must be ({self.spec.height}, {self.spec.width}, 3) uint8, "
-                f"got {frame.shape} {frame.dtype}"
-            )
+        # Masters go in; the delivery size comes out of ffmpeg (`EncodeSpec.master`).
+        expected = (self.spec.master_height, self.spec.master_width, 3)
+        if frame.shape != expected or frame.dtype != np.uint8:
+            raise ValueError(f"frame must be {expected} uint8, got {frame.shape} {frame.dtype}")
         assert self._process.stdin is not None
         try:
             self._process.stdin.write(np.ascontiguousarray(frame).tobytes())

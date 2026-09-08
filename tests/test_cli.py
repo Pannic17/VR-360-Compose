@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 
 import pytest
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
 from vr_compose import __version__
-from vr_compose.cli import build_parser, main
+from vr_compose.cli import _master_size, build_parser, main
 from vr_compose.rig import twenty_file_rig
 
 
@@ -117,3 +118,41 @@ def test_missing_source_exits_with_guidance(
         main(["--source", str(tmp_path / "nope"), "frame"])
     assert caught.value.code == 2
     assert "CameraN" in capsys.readouterr().err
+
+
+def test_master_size_follows_the_tiles_and_the_delivery_size(tmp_path: pathlib.Path) -> None:
+    """The master follows the render, the delivery follows the spec.
+
+    1920 tiles at 8K is the degenerate case -- native density *is* the delivery size, so
+    nothing is resampled and the output stays byte-for-byte what P2 verified. A 16K render
+    (3840 tiles) delivered at 8K, and any 4K delivery, do get a master.
+    """
+    from vr_compose import source as source_mod
+
+    make_source_tree(tmp_path, cameras=20, stem="S", frames=[1])
+    scanned = next(s for s in source_mod.scan(tmp_path) if s.usable)
+    rig = twenty_file_rig()
+
+    def with_tiles(size: int) -> source_mod.SourceSet:
+        # the rule depends only on the tile edge, so fake it rather than write 220 MB
+        return dataclasses.replace(
+            scanned,
+            cameras=tuple(dataclasses.replace(c, width=size, height=size) for c in scanned.cameras),
+        )
+
+    eight_k = with_tiles(1920)
+
+    assert _master_size(eight_k, rig, "8k", "native") is None, "native density is 8K already"
+    assert _master_size(eight_k, rig, "4k", "native") == (7680, 3840), "4K comes off the master"
+    assert _master_size(eight_k, rig, "4k", "delivery") is None, "the opt-out preview path"
+
+    sixteen_k = with_tiles(3840)
+    assert (eight_k.tile_size, sixteen_k.tile_size) == (1920, 3840)
+    assert _master_size(sixteen_k, rig, "8k", "native") == (15360, 7680), "16K render, 8K delivery"
+    assert _master_size(sixteen_k, rig, "4k", "native") == (15360, 7680)
+
+
+def test_stitch_at_defaults_to_native() -> None:
+    parser = build_parser()
+    assert parser.parse_args(["sequence"]).stitch_at == "native"
+    assert parser.parse_args(["sequence", "--stitch-at", "delivery"]).stitch_at == "delivery"

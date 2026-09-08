@@ -88,3 +88,21 @@ def test_unknown_layout_is_refused_with_instructions(count: int) -> None:
     message = str(caught.value)
     assert str(count) in message
     assert "fit_rig" in message, "the error must say how to solve an unknown layout"
+
+
+def test_native_width_is_the_tile_centre_density() -> None:
+    """AGENTS.md section 3: 1920 px / 90 deg == 7680 px / 360 deg, an exact match.
+
+    This is what ties the master size to the render: 1920 tiles give the 8K master,
+    and a 16K render (3840 tiles) gives a 15360-wide one.
+    """
+    rig = twenty_file_rig()
+    assert rig.fov_deg == 90.0
+    assert rig.native_width(1920) == 7680
+    assert rig.native_width(3840) == 15360
+    assert rig.native_width(64) == 256
+    # a hypothetical narrower rig scales the same way, and stays even
+    assert Rig("narrow", rig.views, fov_deg=72.0).native_width(1920) == 9600
+    assert Rig("odd", rig.views, fov_deg=90.0).native_width(3) % 2 == 0
+    with pytest.raises(ValueError, match="tile size"):
+        rig.native_width(0)

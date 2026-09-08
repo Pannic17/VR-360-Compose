@@ -151,9 +151,7 @@ def _job(
 ) -> SequenceJob:
     options: dict[str, object] = dict(segment_gops=1, stats_every=50, keep_segments=True)
     options.update(overrides)
-    spec_kwargs = (
-        {"deterministic": options.pop("deterministic")} if "deterministic" in options else {}
-    )
+    spec_kwargs = {key: options.pop(key) for key in ("deterministic", "master") if key in options}
     return SequenceJob(
         source=src,
         rig=rig_for(src.camera_count),
@@ -188,6 +186,38 @@ def test_full_run_produces_a_conformant_mp4(
     )
     assert seen[-1].done == 130
     assert [p.done for p in seen] == sorted(p.done for p in seen)
+
+
+@needs_ffmpeg
+def test_a_master_is_stitched_then_delivered_smaller(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The warp renders 512x256; ffmpeg delivers 256x128.
+
+    This is the 4K-from-8K path, and the same one a 16K render delivered at 8K takes: the
+    master never reaches the disk and is resampled once, inside the encode.
+    """
+    job = _job(moving_source, tmp_path / "out.mp4", master=(512, 256))
+    summary = pipeline.run_sequence(job)
+
+    assert (summary.stream.width, summary.stream.height) == (256, 128), "delivered size"
+    assert summary.stream.frames == 130 and summary.problems == (), summary.problems
+    assert summary.stream.i_intervals == (60,)
+    assert [r.passed for r in summary.gate_reports] == [True, True, True], "gate ran on masters"
+
+
+@needs_ffmpeg
+def test_a_plan_for_the_delivery_size_is_refused_when_a_master_is_asked_for(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """A plan built at the wrong size must not be silently accepted -- it would deliver
+    an upscaled, aliased frame that still passes every conformance check."""
+    from vr_compose.warp import WarpPlan
+
+    job = _job(moving_source, tmp_path / "out.mp4", master=(512, 256))
+    delivery_plan = WarpPlan.build(job.rig, WIDTH, HEIGHT, TILE)
+    with pytest.raises(ValueError, match="does not match this job"):
+        pipeline.run_sequence(job, plan=delivery_plan)
 
 
 RESUME_CASES = [

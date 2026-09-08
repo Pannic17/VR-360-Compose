@@ -248,11 +248,13 @@ def run_sequence(
     tile_size = job.source.tile_size
     if tile_size is None:
         raise ValueError("source tiles are not square or not uniform; cannot stitch")
+    # The plan renders the *master*; ffmpeg resamples to the delivery size if they differ.
+    master = (job.spec.master_width, job.spec.master_height)
     if plan is None:
         say("building warp plan ...")
-        plan = WarpPlan.build(job.rig, job.spec.width, job.spec.height, tile_size)
+        plan = WarpPlan.build(job.rig, *master, tile_size)
         say(f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB)")
-    elif (plan.width, plan.height, plan.tile_size) != (job.spec.width, job.spec.height, tile_size):
+    elif (plan.width, plan.height, plan.tile_size) != (*master, tile_size):
         raise ValueError("the supplied warp plan does not match this job")
 
     indices = list(job.rig.unique_indices)
