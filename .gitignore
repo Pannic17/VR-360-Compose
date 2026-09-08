@@ -29,3 +29,8 @@ coverage.xml
 *.swp
 Thumbs.db
 desktop.ini
+
+# sequence outputs and their resumable segments (default location is the program directory)
+*.mp4
+*.mp4.part
+*.segments/

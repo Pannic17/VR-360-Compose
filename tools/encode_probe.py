@@ -34,6 +34,8 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from vr_compose import encode as vr_encode
+
 DEFAULT_ROOT = pathlib.Path("E:/22")
 OUTPUT_SUBDIR = "FinishTaskOutput"
 OUTPUT_STEM = "MonoEye.L_Cathedral"
@@ -47,84 +49,26 @@ Image.MAX_IMAGE_PIXELS = None
 
 U8 = npt.NDArray[np.uint8]
 
-SIZES: dict[str, tuple[int, int]] = {"8k": (7680, 3840), "4k": (4096, 2048)}
-
-BITRATES_KBPS: dict[str, tuple[int, ...]] = {
-    "8k": (200_000, 150_000, 100_000),
-    "4k": (57_000, 43_000, 28_000),
-}
-"""Delivery bitrates in kbps. "200k" means 200_000 kbps = 200 Mbps (confirmed).
-
-The 4k ladder is the 8k ladder scaled by the pixel ratio
-(7680*3840) / (4096*2048) = 3.515625, holding bit/pixel constant, then rounded down to a
-round number. Dropping 4k from 200/150/100 to 57/43/28 Mbps costs about 0.6 dB PSNR
-(measured, AGENTS.md §5) and cuts the file from 2.1 GB to 0.6 GB.
-"""
+# Sizes, bitrate ladders and the level/tier policy come from the package: one table, one
+# policy. The tool's job is to *exercise* them against real encodes, not to define them.
+SIZES = vr_encode.SIZES
+BITRATES_KBPS: dict[str, tuple[int, ...]] = dict(vr_encode.BITRATES_KBPS)
 
 EXPECTED_PROFILE = {"h264": "High", "h265": "Main"}
 EXPECTED_TAG = {"h264": "avc1", "h265": "hvc1"}
 
-COLOUR_ARGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
-
-# --- Level tables, so any bitrate can be given its minimum conformant level ---------
-#
-# H.264 (ITU-T H.264 Table A-1): level, MaxFS in macroblocks, MaxMBPS, MaxBR in kbps.
-# MaxBR listed for Main/Baseline; High profile multiplies it by 1.25 (cpbBrNalFactor).
-H264_LEVELS: tuple[tuple[str, int, int, int], ...] = (
-    ("4.0", 8_192, 245_760, 20_000),
-    ("4.1", 8_192, 245_760, 50_000),
-    ("4.2", 8_704, 522_240, 50_000),
-    ("5.0", 22_080, 589_824, 135_000),
-    ("5.1", 36_864, 983_040, 240_000),
-    ("5.2", 36_864, 2_073_600, 240_000),
-    ("6.0", 139_264, 4_177_920, 240_000),
-    ("6.1", 139_264, 8_355_840, 480_000),
-    ("6.2", 139_264, 16_711_680, 800_000),
-)
-H264_HIGH_BR_FACTOR = 1.25
-
-# HEVC (ITU-T H.265 Tables A.6/A.9): level, MaxLumaPs, MaxLumaSr, MaxBR Main, MaxBR High.
-H265_LEVELS: tuple[tuple[str, int, int, int, int], ...] = (
-    ("4.0", 2_228_224, 68_222_976, 12_000, 30_000),
-    ("4.1", 2_228_224, 136_446_976, 20_000, 50_000),
-    ("5.0", 8_912_896, 267_386_880, 25_000, 100_000),
-    ("5.1", 8_912_896, 534_773_760, 40_000, 160_000),
-    ("5.2", 8_912_896, 1_069_547_520, 60_000, 240_000),
-    ("6.0", 35_651_584, 1_069_547_520, 60_000, 240_000),
-    ("6.1", 35_651_584, 2_139_095_040, 120_000, 480_000),
-    ("6.2", 35_651_584, 4_278_190_080, 240_000, 800_000),
-)
+COLOUR_ARGS = list(vr_encode.COLOUR_ARGS)
 
 
 def select_level(size: str, codec: str, kbps: int, fps: int) -> tuple[str, str]:
-    """Minimum conformant (level, tier) for one configuration.
-
-    Lower is better: a lower level asks less of the decoder. Frame size, sample rate and
-    bitrate each impose a floor, so take the highest of the three. For HEVC, Main tier is
-    preferred and High tier used only when no defined Main-tier level admits the bitrate.
+    """Minimum conformant (level, tier) for a named size; delegates to the package.
 
     Never leave the level to the encoder: `libx265` picks Level 7.1 at these bitrates,
     which HEVC does not define, and `hevc_nvenc` picks a Main tier level whose bitrate
     ceiling the stream then exceeds. Both fail silently (AGENTS.md §2).
     """
     width, height = SIZES[size]
-    if codec == "h264":
-        macroblocks = (width // 16) * (height // 16)
-        for level, max_fs, max_mbps, max_br in H264_LEVELS:
-            if (
-                macroblocks <= max_fs
-                and macroblocks * fps <= max_mbps
-                and kbps <= max_br * H264_HIGH_BR_FACTOR
-            ):
-                return level, "-"
-        raise ValueError(f"no H.264 level admits {size} @ {fps} fps, {kbps} kbps")
-    samples = width * height
-    for tier_name in ("main", "high"):
-        for level, max_ps, max_sr, max_br_main, max_br_high in H265_LEVELS:
-            max_br = max_br_main if tier_name == "main" else max_br_high
-            if samples <= max_ps and samples * fps <= max_sr and kbps <= max_br:
-                return level, tier_name
-    raise ValueError(f"no HEVC level admits {size} @ {fps} fps, {kbps} kbps")
+    return vr_encode.select_level(width, height, codec, kbps, fps)
 
 
 def _kbps_list(value: str) -> list[int]:
@@ -572,7 +516,7 @@ def cmd_chroma(args: argparse.Namespace) -> int:
         out.unlink(missing_ok=True)
     print(
         "\n4:2:0 is the quality ceiling, and ffmpeg's own switches do not recover it. "
-        "Doing the RGB->YUV 4:2:0 conversion ourselves in linear light is the P4 "
+        "Doing the RGB->YUV 4:2:0 conversion ourselves in linear light is the P5 "
         "experiment (AGENTS.md §5)."
     )
     return 0

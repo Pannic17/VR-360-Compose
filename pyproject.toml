@@ -13,12 +13,14 @@ authors = [{ name = "vr.dev", email = "vr.dev@of3d.com" }]
 dependencies = [
     "numpy>=2.1",      # 重投影/混合的核心计算
     "pillow>=11.0",    # PNG 编解码
-    "pyside6>=6.8",    # GUI（P5）
+    "tqdm>=4.66",      # CLI 进度条
+    "pyside6>=6.8",    # GUI（P6）
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pyinstaller>=6.10",   # 打包 exe（P6）
+    "pyinstaller>=6.10",   # 打包 exe（P7）
+    "types-tqdm",          # mypy --strict 需要 tqdm 的 stub
     "pytest>=8.3",
     "pytest-cov>=5.0",
     "ruff>=0.6",

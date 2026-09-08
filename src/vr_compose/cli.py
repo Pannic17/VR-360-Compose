@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-The GUI in P5 must be a thin shell over exactly this code, so every operation lives in a
+The GUI in P6 must be a thin shell over exactly this code, so every operation lives in a
 library module and this file only parses arguments and prints. Nothing here hardcodes a
 source path: `--source` is optional and discovery fills it in (AGENTS.md §2, constraint 3).
 """
@@ -13,10 +13,13 @@ import sys
 import time
 from collections.abc import Sequence
 
-from vr_compose import __version__, io, verify
+from tqdm import tqdm
+
+from vr_compose import __version__, encode, io, pipeline, verify
 from vr_compose import source as source_mod
 from vr_compose.rig import UnknownRigError, rig_for
 from vr_compose.stitch import DEFAULT_BAND_ROWS, stitch_frame
+from vr_compose.warp import DEFAULT_THREADS
 
 DEFAULT_WIDTH = 7680
 
@@ -46,7 +49,7 @@ def _resolve_source(explicit: pathlib.Path | None) -> source_mod.SourceSet:
         print(
             f"{len(found)} source sets in {found[0].root} (stems: {stems}).\n"
             "Choose one with --stem; processing an arbitrary first match would risk the "
-            "wrong eye.",
+            "wrong scene.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -134,6 +137,124 @@ def cmd_frame(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def cmd_sequence(args: argparse.Namespace) -> int:
+    candidates = [s for s in source_mod.scan(args.source) if s.usable] if args.source else []
+    chosen = _select_stem(candidates, args.stem) if candidates else _resolve_source(args.source)
+    try:
+        rig = rig_for(chosen.camera_count)
+    except UnknownRigError as exc:
+        raise SystemExit(str(exc)) from None
+    try:
+        frames = pipeline.parse_frames(args.frames, chosen.frames)
+        spec = encode.EncodeSpec.for_size(
+            args.size,
+            args.codec,
+            args.bitrate,
+            args.fps,
+            preset=args.preset,
+            deterministic=args.deterministic,
+        )
+        job = pipeline.SequenceJob(
+            source=chosen,
+            rig=rig,
+            spec=spec,
+            frames=tuple(frames),
+            output=args.out
+            or pipeline.default_output_dir() / pipeline.default_output_name(chosen, spec, frames),
+            segment_gops=args.segment_gops,
+            decode_workers=args.decode_workers,
+            warp_threads=args.warp_threads,
+            stats_every=args.stats_every,
+            resume=not args.no_resume,
+            keep_segments=args.keep_segments,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+    print(f"source     : {chosen.root}  stem {chosen.stem!r}")
+    print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
+    print(
+        f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), "
+        f"{len(job.segments())} segment(s) of up to {job.segment_frames}"
+    )
+    print(f"encode     : {spec.describe()}")
+    print(f"output     : {job.output}")
+
+    bar = tqdm(
+        total=len(frames),
+        unit="frame",
+        desc="stitching",
+        dynamic_ncols=True,
+        disable=args.no_bar,
+        mininterval=1.0,
+    )
+
+    def on_progress(report: pipeline.Progress) -> None:
+        bar.n = report.done
+        speedup = (
+            pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / report.seconds_per_frame
+            if report.seconds_per_frame
+            else 0.0
+        )
+        bar.set_postfix_str(
+            f"seg {report.segment + 1}/{report.segments}  "
+            f"{report.seconds_per_frame:.2f} s/frame  {speedup:.1f}x vs 46.85",
+            refresh=False,
+        )
+        bar.refresh()
+
+    def on_log(message: str) -> None:
+        # tqdm.write keeps the bar intact; a bare print would smear it
+        tqdm.write(f"           {message}")
+
+    try:
+        summary = pipeline.run_sequence(job, progress=on_progress, log=on_log)
+    except pipeline.GeometryGateFailed as exc:
+        raise SystemExit(
+            f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
+        ) from None
+    except KeyboardInterrupt:
+        print(
+            "\ninterrupted; finished segments are kept. Re-run the same command to resume.",
+            file=sys.stderr,
+        )
+        return 130
+    except (encode.FfmpegNotFound, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from None
+    finally:
+        bar.close()
+
+    size_mib = summary.output.stat().st_size / 2**20
+    print(f"\ndone       : {summary.frames} frames -> {summary.output} ({size_mib:.0f} MiB)")
+    if summary.encoded:
+        speedup = pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / summary.seconds_per_frame
+        print(
+            f"throughput : {summary.seconds_per_frame:.2f} s/frame over {summary.encoded} "
+            f"encoded frame(s) ({speedup:.1f}x vs the previous pipeline's 46.85)"
+        )
+    if summary.encoded:
+        print(f"stages     : {summary.stages.report()}")
+    if summary.skipped_segments:
+        print(f"resumed    : {summary.skipped_segments} segment(s) were already complete")
+    gates = summary.gate_reports
+    if gates:
+        worst = max(report.median for report in gates)
+        print(f"geometry   : {len(gates)} sampled frame(s) PASS, worst median {worst:.2f}")
+    stream = summary.stream
+    print(
+        f"stream     : {stream.codec} {stream.profile} L{stream.level} {stream.tag} "
+        f"{stream.width}x{stream.height} {stream.pix_fmt} B={stream.b_frames} "
+        f"I-gap={list(stream.i_intervals)} {stream.bitrate_mbps:.1f} Mbps"
+    )
+    if summary.problems:
+        print("CONFORMANCE PROBLEMS:")
+        for problem in summary.problems:
+            print(f"  - {problem}")
+        return 1
+    print("conformance: OK")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vr-compose", description="VR 360 composition toolkit")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -150,13 +271,55 @@ def build_parser() -> argparse.ArgumentParser:
 
     frame = sub.add_parser("frame", help="stitch a single frame and check its geometry")
     frame.add_argument("--frame", type=int, default=None, help="default: the first shared frame")
-    frame.add_argument("--stem", default=None, help="which eye/scene, when a directory has several")
+    frame.add_argument(
+        "--stem", default=None, help="which scene (file stem), when a directory has several"
+    )
     frame.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="output width (2:1)")
     frame.add_argument("--out", type=pathlib.Path, default=None, help="write the panorama here")
     frame.add_argument("--compress-level", type=int, default=6, choices=range(10))
     frame.add_argument("--band-rows", type=int, default=DEFAULT_BAND_ROWS)
     frame.add_argument("--decode-workers", type=int, default=8)
     frame.set_defaults(func=cmd_frame)
+
+    sequence = sub.add_parser("sequence", help="stitch a frame range straight into a delivery MP4")
+    sequence.add_argument("--frames", default="all", help="'all', '1656-2433', '1656-', or a list")
+    sequence.add_argument(
+        "--stem", default=None, help="which scene (file stem), when a directory has several"
+    )
+    sequence.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=None,
+        help="output .mp4; default: <stem>.<first>-<last>.<WxH>.<codec>.mp4 beside the program",
+    )
+    sequence.add_argument("--size", choices=list(encode.SIZES), default="8k")
+    sequence.add_argument("--codec", choices=["h264", "h265"], default="h264")
+    sequence.add_argument(
+        "--bitrate",
+        choices=list(encode.LADDER),
+        default="high",
+        help="rung of the per-size ladder: 8k 200/150/100 Mbps, 4k 57/43/28 Mbps",
+    )
+    sequence.add_argument("--fps", type=int, default=30, choices=(30, 60))
+    sequence.add_argument("--preset", default="medium", help="x264/x265 preset; never ultrafast")
+    sequence.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="byte-reproducible x265 (frame-threads=1:wpp=0, ~8x slower); x264 already is",
+    )
+    sequence.add_argument("--segment-gops", type=int, default=5, help="GOPs per resumable segment")
+    sequence.add_argument(
+        "--decode-workers",
+        type=int,
+        default=4,
+        help="threads decoding the next frame; more than 4 slows the warp (GIL contention)",
+    )
+    sequence.add_argument("--warp-threads", type=int, default=DEFAULT_THREADS)
+    sequence.add_argument("--stats-every", type=int, default=100, help="geometry gate cadence")
+    sequence.add_argument("--no-bar", action="store_true", help="plain log lines, no tqdm bar")
+    sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
+    sequence.add_argument("--keep-segments", action="store_true")
+    sequence.set_defaults(func=cmd_sequence)
     return parser
 
 

@@ -34,7 +34,7 @@ def test_parser_exposes_both_subcommands() -> None:
 def test_discover_reports_the_set_and_the_rig(
     tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    make_source_tree(tmp_path, cameras=20, stem="L_Scene", frames=[1, 2])
+    make_source_tree(tmp_path, cameras=20, stem="Scene_A", frames=[1, 2])
     assert main(["--source", str(tmp_path), "discover"]) == 0
     out = capsys.readouterr().out
     assert "cameras    : 20" in out
@@ -67,7 +67,7 @@ def test_frame_stitches_and_passes_the_gate(
     make_source_tree(
         tmp_path,
         cameras=20,
-        stem="L_Scene",
+        stem="Scene_A",
         frames=[5],
         size=(128, 128),
         tile_for=lambda index, _frame: tiles[index],
@@ -104,8 +104,8 @@ def test_frame_refuses_an_unknown_rig(tmp_path: pathlib.Path) -> None:
 
 
 def test_frame_requires_a_valid_stem_choice(tmp_path: pathlib.Path) -> None:
-    make_source_tree(tmp_path, cameras=20, stem="L_S", frames=[1])
-    make_source_tree(tmp_path, cameras=20, stem="R_S", frames=[1])
+    make_source_tree(tmp_path, cameras=20, stem="Scene_A", frames=[1])
+    make_source_tree(tmp_path, cameras=20, stem="Scene_B", frames=[1])
     with pytest.raises(SystemExit, match="available: "):
         main(["--source", str(tmp_path), "frame", "--stem", "Q_S", "--width", "128"])
 

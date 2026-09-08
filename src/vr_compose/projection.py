@@ -132,7 +132,7 @@ def project_to_tile(
 def tile_pixel_index(x: F64, y: F64, size: int, fov_deg: float) -> tuple[I32, I32]:
     """Normalised image-plane coordinates -> nearest pixel ``(column, row)``.
 
-    Nearest neighbour is the P1 sampler. P3 replaces it with an anisotropic filter; the
+    Nearest neighbour is the P1 sampler. P4 replaces it with an anisotropic filter; the
     interface stays because the LUT stores the same coordinates either way.
     """
     t = half_extent(fov_deg)

@@ -30,7 +30,7 @@ def test_detects_the_reference_shape(tmp_path: pathlib.Path) -> None:
 @pytest.mark.parametrize(
     ("cameras", "stem", "inner", "digits"),
     [
-        (6, "R_Grotto", "Temporary", 4),
+        (6, "Grotto", "Temporary", 4),
         (4, "Shot_A", None, 3),
         (3, "scene.take2", "frames", 5),
         (2, "X", "a", 2),
@@ -60,11 +60,11 @@ def test_camera_directory_naming_variants(tmp_path: pathlib.Path) -> None:
 
 
 def test_two_stems_are_two_sets(tmp_path: pathlib.Path) -> None:
-    """Stereo input is two sets, recognised without special-casing the L_/R_ prefix."""
-    make_source_tree(tmp_path, cameras=4, stem="L_Scene", frames=range(1, 4))
-    make_source_tree(tmp_path, cameras=4, stem="R_Scene", frames=range(1, 4))
+    """Two stems are two sets; prefixes are never special-cased."""
+    make_source_tree(tmp_path, cameras=4, stem="Shot_A", frames=range(1, 4))
+    make_source_tree(tmp_path, cameras=4, stem="Shot_B", frames=range(1, 4))
     found = sorted(s.stem for s in source.scan(tmp_path) if s.usable)
-    assert found == ["L_Scene", "R_Scene"]
+    assert found == ["Shot_A", "Shot_B"]
 
 
 def test_frames_are_the_intersection(tmp_path: pathlib.Path) -> None:
@@ -156,10 +156,10 @@ def test_tiles_deeper_than_one_level_are_not_found(tmp_path: pathlib.Path) -> No
 
 
 def test_tile_path_round_trips(tmp_path: pathlib.Path) -> None:
-    make_source_tree(tmp_path, cameras=3, stem="L_Set", frames=[7, 8])
+    make_source_tree(tmp_path, cameras=3, stem="Scene_Set", frames=[7, 8])
     detected = source.scan(tmp_path)[0]
     path = detected.tile_path(2, 8)
-    assert path.name == "L_Set.0008.png"
+    assert path.name == "Scene_Set.0008.png"
     assert path.exists()
     with pytest.raises(ValueError, match="no camera 9"):
         detected.tile_path(9, 8)

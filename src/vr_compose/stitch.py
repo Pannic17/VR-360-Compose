@@ -15,7 +15,7 @@ Two structural choices worth keeping:
   nothing extra.
 
 P1 samples nearest-neighbour and recomputes geometry per frame. P2 replaces the geometry
-with a cached LUT and P3 replaces the sampler; both must keep this module's output
+with a cached LUT and P4 replaces the sampler; both must keep this module's output
 identical on the same inputs, which is what the verification metrics are for.
 """
 
@@ -36,6 +36,23 @@ U8 = npt.NDArray[np.uint8]
 __all__ = ["BandStats", "StitchResult", "stitch_bands", "stitch_frame"]
 
 LUMA_BT709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def luma_bt709(rgb: F32) -> F32:
+    """Rec. 709 luma of an ``(n, 3)`` float32 array, computed elementwise on purpose.
+
+    ``rgb @ LUMA_BT709`` would hand the dot product to BLAS, whose summation order depends
+    on array length and alignment, so identical pixels could get luma differing in the
+    last bit depending on how the work was batched. Elementwise float32 arithmetic is
+    deterministic, which the plan-equals-stitch guarantee in :mod:`vr_compose.warp`
+    depends on.
+    """
+    return np.asarray(
+        rgb[:, 0] * LUMA_BT709[0] + rgb[:, 1] * LUMA_BT709[1] + rgb[:, 2] * LUMA_BT709[2],
+        dtype=np.float32,
+    )
+
+
 DEFAULT_BAND_ROWS = 512
 _EPSILON = np.float32(1e-6)
 
@@ -160,7 +177,7 @@ def stitch_bands(
             w = _feather(x[visible], y[visible], half)
             colour[visible] += sampled * w[:, None]
             weight[visible] += w
-            luma = sampled @ LUMA_BT709
+            luma = luma_bt709(sampled)
             band.count[visible] += 1.0
             band.luma_sum[visible] += luma
             band.luma_sq_sum[visible] += luma.astype(np.float64) ** 2

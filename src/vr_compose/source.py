@@ -62,7 +62,7 @@ class CameraFiles:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class SourceSet:
-    """One stem (one eye) across all its cameras, plus whatever does not add up."""
+    """One stem (one scene) across all its cameras, plus whatever does not add up."""
 
     root: pathlib.Path
     stem: str
@@ -115,7 +115,7 @@ class SourceSet:
         span = f"{frames[0]}..{frames[-1]} ({len(frames)} present)" if frames else "none shared"
         lines = [
             f"root       : {self.root}",
-            f"stem (eye) : {self.stem}",
+            f"stem       : {self.stem}",
             f"cameras    : {self.camera_count}",
             f"tile       : {f'{size}x{size}' if size else 'INCONSISTENT / not square'}",
             f"frames     : {span}",
@@ -145,8 +145,8 @@ def _tile_directory(camera_dir: pathlib.Path) -> pathlib.Path | None:
 def scan(root: pathlib.Path) -> list[SourceSet]:
     """Every source set directly under `root`, one per file stem, sorted by stem.
 
-    Two stems (``L_`` and ``R_``) come back as two sets, which is how stereo input is
-    recognised without special-casing the prefix.
+    A stem is whatever UE named the render. Several stems in one root just mean several
+    scenes or versions, and the prefix is never special-cased.
     """
     if not root.is_dir():
         return []
@@ -275,8 +275,8 @@ def discover(
     """``(usable source sets, directories searched)``.
 
     Stops at the first root that yields anything usable. More than one set means several
-    eyes or scenes; the caller must choose, because silently taking the first match would
-    process the wrong eye.
+    scenes; the caller must choose, because silently taking the first match would process
+    the wrong one.
     """
     searched: list[pathlib.Path] = []
     for root in candidate_roots(explicit):
