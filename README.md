@@ -40,7 +40,19 @@ py -3.13 -m venv .venv
 ```
 
 装好后 `.venv/Scripts/vr-compose.exe` 就是命令入口（下文简写为 `vr-compose`）。
-打包成独立 exe 是 ROADMAP 的 P8。
+
+**要发布的独立 exe（P8，已完成）**用一条命令产出，两种形态自选：
+
+```bash
+python tools/build_exe.py --ffmpeg C:/ffmpeg/bin              # dist/VR-Compose/ 538 MiB
+python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --onefile    # dist/onefile/VR-Compose.exe 210 MiB
+```
+
+差别只在 ffmpeg 放哪儿：文件夹版摆在 exe 同级，单文件版打进包里。
+文件夹版启动约 0.4 秒，单文件版每次启动都要把约 494 MiB 解到 `%TEMP%`。
+两种都自带中文说明（`.md` 与构建时现排的 `.pdf`）。
+构建后的校验（跑打包好的 exe、与源码逐字节比对）是 `--smoke`，**默认关闭** ——
+打包和写文档的时候不该等它。
 
 ## 快速开始
 
@@ -244,6 +256,8 @@ GPU 加速列为可选项（估计 warp 可到 30–40 ms，778 帧约 3 分钟�
 显式写范围（`--frames 1656-2433`）。
 
 **`ffmpeg and ffprobe were not found`** —— 把 `ffmpeg.exe` 和 `ffprobe.exe` 放到程序同级目录，或加进 PATH。
+（发布版自带：文件夹版在 exe 同级，单文件版打在包里。查找顺序是 **exe 同级 → 包内 → PATH**，
+所以把自己的构建放在 exe 旁边就能覆盖自带的那份。）
 带 `libx264` / `libx265` 的构建才行。
 
 **`no rig registered for N cameras`** —— 相机数不是 20，程序不知道这套装配的朝向。
@@ -266,7 +280,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 268 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 290 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools

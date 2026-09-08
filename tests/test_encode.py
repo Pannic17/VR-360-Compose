@@ -338,3 +338,53 @@ def test_a_downsampling_writer_wants_masters_not_delivery_frames(tmp_path: pathl
     with pytest.raises(ValueError, match=r"frame must be \(64, 128, 3\)"):
         writer.write(np.zeros((32, 64, 3), np.uint8))  # the delivery size, not the master's
     writer.abort()
+
+
+def test_a_frozen_build_looks_beside_the_exe_then_inside_the_bundle(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The onefile build carries ffmpeg inside itself, at `sys._MEIPASS`.
+
+    The order matters and is the reason this is a test rather than a comment: beside the
+    executable comes first, so someone can still drop their own ffmpeg.exe next to the
+    application and have it used. Reverse it and the bundled copy would always win,
+    silently ignoring the one they put there.
+    """
+    beside, bundle = tmp_path / "beside", tmp_path / "bundle"
+    beside.mkdir()
+    bundle.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(beside / "VR-Compose.exe"), raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+
+    assert encode._search_dirs() == [beside, bundle]
+
+
+def test_a_frozen_onedir_build_has_no_bundle_directory_to_search(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without `_MEIPASS` the list is just the application directory, as before."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "VR-Compose.exe"), raising=False)
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+
+    assert encode._search_dirs() == [tmp_path]
+
+
+def test_the_bundled_tool_is_found_when_nothing_sits_beside_the_exe(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    beside, bundle = tmp_path / "beside", tmp_path / "bundle"
+    beside.mkdir()
+    bundle.mkdir()
+    name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    (bundle / name).write_bytes(b"")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(beside / "VR-Compose.exe"), raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+
+    assert encode._locate("ffmpeg") == bundle / name
+
+    # ...and a copy beside the executable takes precedence over it.
+    (beside / name).write_bytes(b"")
+    assert encode._locate("ffmpeg") == beside / name

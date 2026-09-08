@@ -126,9 +126,20 @@ class Tools:
 
 
 def _search_dirs() -> list[pathlib.Path]:
-    """Next to the executable first. Frozen, that is the application directory."""
+    """Next to the executable first. Frozen, that is the application directory.
+
+    A onefile build then falls back to `sys._MEIPASS`, the directory its bootloader
+    unpacked the bundle into, because that is where a onefile build's own ffmpeg lives
+    (the onedir build has none there -- `_MEIPASS` is the application directory itself).
+
+    The order is deliberate: **beside the executable wins over the bundled copy.** It is
+    what lets someone drop their own ffmpeg.exe next to the application and have it used,
+    which is the documented behaviour and worth keeping when the shipped one moves inside.
+    """
     if getattr(sys, "frozen", False):
-        return [pathlib.Path(sys.executable).parent]
+        beside = pathlib.Path(sys.executable).parent
+        bundled = getattr(sys, "_MEIPASS", None)
+        return [beside] if bundled is None else [beside, pathlib.Path(bundled)]
     here = pathlib.Path(__file__).resolve()
     return [pathlib.Path(sys.executable).parent, here.parents[2], here.parents[2] / "bin"]
 

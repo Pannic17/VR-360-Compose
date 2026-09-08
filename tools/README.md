@@ -21,7 +21,7 @@
 | `temporal_probe.py` | §8「时域稳定性」—— 连续 10 帧的方差与与网格无关的跳变界 | 约 4 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池（**探针**，用合成小程序） | 每种配置约 90 s 构建 |
-| `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明（md 与 pdf）+ 冒烟校验 | 约 2 分钟 |
+| `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明（md 与 pdf）+ 冒烟校验；`--onefile` 出单文件 | 约 2 / 5 分钟 |
 | `manual_pdf.py` | 把 `docs/使用说明.md` 排版成 PDF（Edge/Chrome 无头打印） | 数秒 |
 
 已经进产品代码、不再需要独立脚本的：
@@ -81,14 +81,22 @@
 ```
 
 ```bash
-.\.venv\Scripts\python.exe tools\build_exe.py --source E:/22
+.\.venv\Scripts\python.exe tools\build_exe.py --ffmpeg C:/ffmpeg/bin --source E:/22
+.\.venv\Scripts\python.exe tools\build_exe.py --ffmpeg C:/ffmpeg/bin --onefile --source E:/22
 ```
 
 `build_exe.py` 与 `package_probe.py` 的分工：探针是拿一个合成的小程序去量**打包方式的代价**
 （onedir 对 onefile、要不要写排除列表、冻结后进程池行不行）；
-`build_exe.py` 是照那些结论**真的产出可分发的文件夹** ——
+`build_exe.py` 是照那些结论**真的产出可分发物** ——
 PyInstaller 走 `VR-Compose.spec`，然后把 ffmpeg/ffprobe 和中文说明放进去，
 最后拿**打包好的 exe**（不是源码）跑一次两帧渲染，并与源码跑出来的**逐字节比对**。
+
+**两种形态**，差别只在 ffmpeg 放哪儿：文件夹版（默认）摆在 exe 同级 → `dist/VR-Compose/`；
+单文件版 `--onefile` 打进包里（运行时从 `sys._MEIPASS` 找，见 `encode._search_dirs()`）
+→ `dist/onefile/VR-Compose.exe`，那一个文件就是整个程序。
+`.spec` 靠 `VRC_ONEFILE` / `VRC_FFMPEG_DIR` 两个环境变量分流，由这个脚本设置；
+直接手跑 `.spec` 得到的是文件夹版。
+**单文件是用户 2026-09-08 在看过代价之后指定的**，代价与数字见 AGENTS.md 第 7 节。
 
 `manual_pdf.py` 由 `build_exe.py` 自动调用，一般不用单独跑 —— 单独跑是为了改完说明先看一眼排版：
 

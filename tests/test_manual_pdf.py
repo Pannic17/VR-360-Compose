@@ -63,8 +63,8 @@ def test_every_line_of_the_manual_survives_the_conversion() -> None:
 def test_the_manual_renders_to_a_plausible_document() -> None:
     html = manual_pdf.convert(manual_pdf.MANUAL.read_text(encoding="utf-8"))
     assert html.count("<h1>") == 1
-    # 来源与输出, 输出模式, 参数, 大概要跑多久, 出问题怎么看
-    assert html.count("<table>") == 5, "one per table in the manual"
+    # 你拿到的是, 来源与输出, 输出模式, 参数, 大概要跑多久, 出问题怎么看
+    assert html.count("<table>") == 6, "one per table in the manual"
     assert html.count("<pre>") == 2
     assert "<thead>" in html and "<tbody>" in html
     assert "<img" not in html and "<a " not in html

@@ -1,24 +1,45 @@
-"""Build the distributable folder: PyInstaller, then stage ffmpeg and the manual.
+"""Build the distributable: PyInstaller, then stage ffmpeg and the manual, then check it.
 
-ROADMAP P8. The build has to be repeatable by one command, so everything the folder
-needs ends up in it here rather than in someone's memory:
+ROADMAP P8. The build has to be repeatable by one command, so everything the product
+needs ends up in it here rather than in someone's memory.
 
-1. PyInstaller against `VR-Compose.spec` (onedir -- see the spec for why).
-2. `ffmpeg.exe` and `ffprobe.exe` copied next to the executable. `encode.find_tools()`
-   looks beside the executable *before* PATH, so a copied pair makes the folder work on
-   a machine with no ffmpeg installed, which is the whole point of shipping it.
-3. The Chinese manual copied in, because a folder someone unzips should explain itself.
-4. A smoke check on what was built: version, discovery, and a real two-frame render, run
-   through the packaged executable rather than the source tree.
+    python tools/build_exe.py --ffmpeg C:/ffmpeg/bin              # the folder (default)
+    python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --onefile    # one executable
+    python tools/build_exe.py --skip-build                        # re-stage only
+    python tools/build_exe.py --smoke --source E:/22              # + check what was built
 
-    python tools/build_exe.py
-    python tools/build_exe.py --skip-build          # re-stage and re-check only
-    python tools/build_exe.py --ffmpeg C:/ffmpeg/bin
+**The smoke check is off by default** (user's instruction, 2026-09-08): a packaging or
+documentation run should build the thing and stop. Turn it on with `--smoke` while
+developing, which is where a failing check is worth the minutes it costs.
+
+**Two shapes, and the difference is where ffmpeg goes.**
+
+*onedir* (default) produces `dist/VR-Compose/`: the executable, `ffmpeg.exe` and
+`ffprobe.exe` beside it, and the manual. `encode.find_tools()` looks beside the
+executable before PATH, so the folder works on a machine with no ffmpeg installed --
+which is the whole point of shipping it.
+
+*onefile* (`--onefile`, user's decision on 2026-09-08) produces
+`dist/onefile/VR-Compose.exe`: ffmpeg and ffprobe go *inside* the bundle, found at
+runtime through `sys._MEIPASS`. That executable alone is the whole application -- copy
+it anywhere and it runs. The manual is written beside it as documentation, not because
+the program needs it.
+
+The onefile cost is measured in AGENTS.md section 7 and is not a tuning problem: the
+bootloader unpacks the entire archive on every launch, ffmpeg is most of that archive,
+and extraction happens before any of this project's code could cache anything.
+
+`--smoke` checks **what was built** rather than the source tree: a version query and,
+given `--source`, a two-frame render whose output is compared byte for byte against the
+same render from source. A mismatch fails the build.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
+import os
 import pathlib
 import shutil
 import subprocess
@@ -27,10 +48,29 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = ROOT / "VR-Compose.spec"
-DIST = ROOT / "dist" / "VR-Compose"
-EXE = DIST / "VR-Compose.exe"
+DIST = ROOT / "dist"
 MANUAL = ROOT / "docs" / "使用说明.md"
 TOOLS = ("ffmpeg.exe", "ffprobe.exe")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Layout:
+    """Where this shape of build puts things, so nothing else has to branch on the mode."""
+
+    onefile: bool
+
+    @property
+    def directory(self) -> pathlib.Path:
+        """What gets zipped and handed over. For onefile that is just the exe's home."""
+        return DIST / ("onefile" if self.onefile else "VR-Compose")
+
+    @property
+    def exe(self) -> pathlib.Path:
+        return self.directory / "VR-Compose.exe"
+
+    @property
+    def describe(self) -> str:
+        return "one executable" if self.onefile else "a self-contained folder"
 
 
 def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -42,44 +82,18 @@ def folder_size(path: pathlib.Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
-def ensure_not_running() -> None:
-    """Refuse to build over a copy of the app that is open.
+def locate_tools(source: pathlib.Path | None) -> list[pathlib.Path]:
+    """The ffmpeg pair to ship, found the way the application would find them.
 
-    Windows locks a running executable's files, so PyInstaller's `--clean` fails when it
-    tries to empty the directory -- and it fails deep inside `shutil.rmtree`, on whichever
-    `.pyd` it reached first, which says nothing about the actual cause. Opening the
-    executable for append asks the same question up front and gets the same answer.
+    Doing it here means a missing tool is reported by the build rather than by a user's
+    first render, and it is the same list whether they get copied beside the executable
+    or packed inside it.
     """
-    if not EXE.exists():
-        return
-    try:
-        with EXE.open("ab"):
-            pass
-    except PermissionError:
-        raise SystemExit(
-            f"{EXE.name} is running, so its files cannot be replaced. Close the "
-            "application (or its console) and run this again. Use --skip-build to "
-            "re-stage ffmpeg and the manual without rebuilding."
-        ) from None
-
-
-def build() -> None:
-    ensure_not_running()
-    result = run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(SPEC)])
-    if result.returncode != 0:
-        raise SystemExit(f"PyInstaller failed with {result.returncode}")
-
-
-def stage_ffmpeg(source: pathlib.Path | None) -> None:
-    """Copy ffmpeg and ffprobe beside the executable.
-
-    Located the same way the application will look for them if this step is skipped, so
-    a missing tool is reported here rather than by a user's first render.
-    """
+    found: list[pathlib.Path] = []
     for name in TOOLS:
         if source is not None:
-            found: pathlib.Path | None = source / name
-            if not (found and found.is_file()):
+            candidate = source / name
+            if not candidate.is_file():
                 raise SystemExit(f"{name} is not in {source}")
         else:
             located = shutil.which(name.removesuffix(".exe"))
@@ -88,55 +102,136 @@ def stage_ffmpeg(source: pathlib.Path | None) -> None:
                     f"{name} was not found on PATH. Pass --ffmpeg with the directory "
                     "holding ffmpeg.exe and ffprobe.exe, or install ffmpeg."
                 )
-            found = pathlib.Path(located)
-        target = DIST / name
-        print(f"    staging {found} -> {target}", flush=True)
-        shutil.copy2(found, target)
+            candidate = pathlib.Path(located)
+        found.append(candidate)
+    return found
 
 
-def stage_manual() -> None:
+def ensure_not_running(exe: pathlib.Path) -> None:
+    """Refuse to build over a copy of the app that is open.
+
+    Windows locks a running executable's files, so PyInstaller's `--clean` fails when it
+    tries to empty the directory -- and it fails deep inside `shutil.rmtree`, on whichever
+    `.pyd` it reached first, which says nothing about the actual cause. Opening the
+    executable for append asks the same question up front and gets the same answer.
+    """
+    if not exe.exists():
+        return
+    try:
+        with exe.open("ab"):
+            pass
+    except PermissionError:
+        raise SystemExit(
+            f"{exe.name} is running, so its files cannot be replaced. Close the "
+            "application (or its console) and run this again. Use --skip-build to "
+            "re-stage ffmpeg and the manual without rebuilding."
+        ) from None
+
+
+def build(layout: Layout, tools: list[pathlib.Path]) -> None:
+    """Drive PyInstaller. The spec reads the shape out of the environment; see its docstring."""
+    ensure_not_running(layout.exe)
+    environment = dict(os.environ)
+    if layout.onefile:
+        environment["VRC_ONEFILE"] = "1"
+        # The pair is already located and verified, so hand the spec their directory
+        # rather than letting it search again and disagree.
+        environment["VRC_FFMPEG_DIR"] = str(tools[0].parent)
+    else:
+        environment.pop("VRC_ONEFILE", None)
+        environment.pop("VRC_FFMPEG_DIR", None)
+
+    command = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        # onefile writes `<distpath>/VR-Compose.exe`, while onedir's COLLECT creates a
+        # `VR-Compose/` subdirectory of its own -- so the two want distpaths one level
+        # apart to land in the same place.
+        "--distpath",
+        str(layout.directory if layout.onefile else DIST),
+        str(SPEC),
+    ]
+    print(f"$ {' '.join(command)}", flush=True)
+    result = subprocess.run(command, text=True, env=environment)
+    if result.returncode != 0:
+        raise SystemExit(f"PyInstaller failed with {result.returncode}")
+
+
+def stage_ffmpeg(layout: Layout, tools: list[pathlib.Path]) -> None:
+    if layout.onefile:
+        print("    ffmpeg/ffprobe are inside the executable (VRC_FFMPEG_DIR)", flush=True)
+        return
+    for tool in tools:
+        target = layout.directory / tool.name
+        print(f"    staging {tool} -> {target}", flush=True)
+        shutil.copy2(tool, target)
+
+
+def stage_manual(layout: Layout) -> None:
     """Both the Markdown and a freshly printed PDF of it.
 
     The PDF is generated here rather than committed, so it cannot drift from the
-    Markdown: there is no version of this folder whose PDF is a release behind. Both
-    ship because they are for different readers -- the PDF opens on any machine and
-    prints, the Markdown is the one you edit and diff.
+    Markdown: there is no version of this build whose PDF is a release behind. Both ship
+    because they are for different readers -- the PDF opens on any machine and prints,
+    the Markdown is the one you edit and diff.
+
+    For a onefile build these sit *beside* the executable as documentation. The
+    executable does not need them, which is what makes it one file.
     """
     if not MANUAL.is_file():
         raise SystemExit(f"the manual is missing: {MANUAL}")
-    shutil.copy2(MANUAL, DIST / MANUAL.name)
+    layout.directory.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MANUAL, layout.directory / MANUAL.name)
     print(f"    staging {MANUAL.name}", flush=True)
 
-    pdf = DIST / MANUAL.with_suffix(".pdf").name
+    pdf = layout.directory / MANUAL.with_suffix(".pdf").name
     result = run([sys.executable, str(ROOT / "tools" / "manual_pdf.py"), "--out", str(pdf)])
     if result.returncode != 0 or not pdf.is_file():
         raise SystemExit(f"the manual PDF was not produced (exit {result.returncode})")
     print(f"    staging {pdf.name}  {pdf.stat().st_size / 1024:.0f} KiB", flush=True)
 
 
-def smoke(source: pathlib.Path | None) -> None:
+def digest(directory: pathlib.Path) -> list[str]:
+    return [
+        hashlib.sha256(item.read_bytes()).hexdigest()[:16]
+        for item in sorted(directory.glob("*.png"))
+    ]
+
+
+def smoke(layout: Layout, source: pathlib.Path | None) -> None:
     """Exercise the built executable, not the source tree.
 
-    The interesting one is the render: it proves the packaged app found its own ffmpeg,
-    that the warp plan and the encoder work frozen, and -- because the output is compared
-    against the source tree's -- that freezing changed no pixels.
+    The interesting one is the render: it proves the packaged app found its own ffmpeg --
+    which for onefile means it found it inside itself -- that the warp plan and the
+    encoder work frozen, and, because the output is compared against the source tree's,
+    that freezing changed no pixels.
+
+    The version query is timed twice on purpose. The first call and a later one differ by
+    the whole cost of unpacking a onefile bundle, and that gap is the number someone
+    deciding between the two shapes actually needs.
     """
-    started = time.time()
-    version = run([str(EXE), "--version"], capture_output=True)
-    print(f"    --version -> {version.stdout.strip()!r} in {time.time() - started:.2f} s")
-    if version.returncode != 0:
-        raise SystemExit(f"the packaged executable failed --version:\n{version.stderr}")
+    exe = layout.exe
+    timings = []
+    for _ in range(2):
+        started = time.time()
+        version = run([str(exe), "--version"], capture_output=True)
+        timings.append(time.time() - started)
+        if version.returncode != 0:
+            raise SystemExit(f"the packaged executable failed --version:\n{version.stderr}")
+    print(f"    --version -> {version.stdout.strip()!r}")
+    print(f"    startup: {timings[0]:.2f} s first, {timings[1]:.2f} s again")
 
     if source is None:
         print("    (no --source given, skipping the render check)")
         return
 
-    for label, target in (
-        ("packaged", DIST.parent / "smoke_exe"),
-        ("source", DIST.parent / "smoke_src"),
-    ):
+    for label, target in (("packaged", DIST / "smoke_exe"), ("source", DIST / "smoke_src")):
         shutil.rmtree(target, ignore_errors=True)
-        command = [str(EXE)] if label == "packaged" else [sys.executable, str(ROOT / "main_ui.py")]
+        command = [str(exe)] if label == "packaged" else [sys.executable, str(ROOT / "main_ui.py")]
+        started = time.time()
         result = run(
             [*command, "--source", str(source), "sequence", "--out-format", "png",
              "--frames", "1656-1657", "--sampler", "nearest", "--out", str(target),
@@ -145,16 +240,9 @@ def smoke(source: pathlib.Path | None) -> None:
         )  # fmt: skip
         if result.returncode != 0:
             raise SystemExit(f"the {label} render failed:\n{result.stdout}\n{result.stderr}")
+        print(f"    {label} render: {time.time() - started:.1f} s")
 
-    import hashlib
-
-    def digest(directory: pathlib.Path) -> list[str]:
-        return [
-            hashlib.sha256(item.read_bytes()).hexdigest()[:16]
-            for item in sorted(directory.glob("*.png"))
-        ]
-
-    packaged, from_source = digest(DIST.parent / "smoke_exe"), digest(DIST.parent / "smoke_src")
+    packaged, from_source = digest(DIST / "smoke_exe"), digest(DIST / "smoke_src")
     print(f"    packaged masters : {packaged}")
     print(f"    source masters   : {from_source}")
     if not packaged or packaged != from_source:
@@ -176,23 +264,49 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="a real source set, to render two frames through the packaged executable",
     )
-    parser.add_argument("--skip-build", action="store_true", help="re-stage and re-check only")
+    parser.add_argument(
+        "--onefile",
+        action="store_true",
+        help="one executable with ffmpeg inside it, instead of a folder (see the module docstring)",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="run the checks against the built executable. Off by default (user's "
+        "instruction, 2026-09-08): packaging and documentation runs should just build",
+    )
+    parser.add_argument("--skip-build", action="store_true", help="re-stage only")
     args = parser.parse_args(argv)
 
+    if args.source is not None and not args.smoke:
+        raise SystemExit(
+            "--source is only used by the smoke check, which is off by default. Add "
+            "--smoke to run it, or drop --source. Refusing rather than ignoring it, "
+            "because a silently skipped render check looks exactly like a passing one."
+        )
+
+    layout = Layout(onefile=args.onefile)
+    tools = locate_tools(args.ffmpeg)
+
     if not args.skip_build:
-        build()
-    if not EXE.is_file():
-        raise SystemExit(f"no executable at {EXE}; run without --skip-build first")
+        build(layout, tools)
+    if not layout.exe.is_file():
+        raise SystemExit(f"no executable at {layout.exe}; run without --skip-build first")
 
     print("staging:", flush=True)
-    stage_ffmpeg(args.ffmpeg)
-    stage_manual()
-    print("smoke check:", flush=True)
-    smoke(args.source)
+    stage_ffmpeg(layout, tools)
+    stage_manual(layout)
+    if args.smoke:
+        print("smoke check:", flush=True)
+        smoke(layout, args.source)
 
-    size = folder_size(DIST)
-    print(f"\n{DIST}  {size / 2**20:.0f} MiB")
-    print("ready to zip. The folder is self-contained: unzip and run VR-Compose.exe.")
+    print(f"\n{layout.directory}  {folder_size(layout.directory) / 2**20:.0f} MiB total")
+    print(f"    {layout.exe.name}  {layout.exe.stat().st_size / 2**20:.0f} MiB")
+    if layout.onefile:
+        print("the executable alone is the whole application: copy it anywhere and run it.")
+        print("the manual beside it is documentation; the program does not read it.")
+    else:
+        print("ready to zip. The folder is self-contained: unzip and run VR-Compose.exe.")
     return 0
 
 
