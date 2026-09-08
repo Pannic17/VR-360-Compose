@@ -16,7 +16,7 @@ import pytest
 from conftest import analytic_panorama, sample_panorama_into_tile
 from vr_compose import verify
 from vr_compose.rig import Rig, View, twenty_file_rig
-from vr_compose.stitch import stitch_frame
+from vr_compose.stitch import SAMPLERS, stitch_frame
 from vr_compose.warp import PLAN_FORMAT, WarpPlan, plan_fingerprint
 
 U8 = npt.NDArray[np.uint8]
@@ -39,9 +39,40 @@ def plan(rig: Rig) -> WarpPlan:
     return WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE)
 
 
-def test_plan_matches_stitch_byte_for_byte(rig: Rig, tiles: dict[int, U8], plan: WarpPlan) -> None:
-    expected = stitch_frame(tiles, rig, WIDTH).image
+@pytest.mark.parametrize("sampler", list(SAMPLERS))
+def test_plan_matches_stitch_byte_for_byte(rig: Rig, tiles: dict[int, U8], sampler: str) -> None:
+    """Metric D, once per sampler. The plan is a cache, never a second implementation."""
+    expected = stitch_frame(tiles, rig, WIDTH, sampler=sampler).image
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, sampler=sampler)
+    assert plan.sampler == sampler
     assert np.array_equal(plan.apply(tiles).image, expected)
+
+
+def test_the_samplers_actually_differ(rig: Rig, tiles: dict[int, U8]) -> None:
+    """Otherwise the test above proves nothing about the interpolation."""
+    nearest = stitch_frame(tiles, rig, WIDTH, sampler="nearest").image
+    bilinear = stitch_frame(tiles, rig, WIDTH, sampler="bilinear").image
+    assert not np.array_equal(nearest, bilinear)
+    # a smooth panorama: interpolation should move most pixels, but only slightly
+    difference = np.abs(nearest.astype(int) - bilinear.astype(int))
+    assert difference.mean() > 0.5, difference.mean()
+    assert np.percentile(difference, 99) < 40, "not a rewrite of the image"
+
+
+def test_an_unknown_sampler_is_refused(rig: Rig, tiles: dict[int, U8]) -> None:
+    with pytest.raises(ValueError, match="sampler must be one of"):
+        WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, sampler="lanczos")
+    with pytest.raises(ValueError, match="sampler must be one of"):
+        stitch_frame(tiles, rig, WIDTH, sampler="lanczos")
+
+
+def test_a_bilinear_plan_costs_four_more_bytes_an_entry(rig: Rig) -> None:
+    nearest = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, sampler="nearest")
+    bilinear = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, sampler="bilinear")
+    assert nearest.entries == bilinear.entries
+    assert nearest.nbytes / nearest.entries == pytest.approx(12.0)
+    assert bilinear.nbytes / bilinear.entries == pytest.approx(20.0)
+    assert nearest.fingerprint != bilinear.fingerprint, "the sampler is part of the identity"
 
 
 @pytest.mark.parametrize("threads", [1, 2, 3, 7, 32])

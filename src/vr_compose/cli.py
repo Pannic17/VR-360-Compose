@@ -18,7 +18,7 @@ from tqdm import tqdm
 from vr_compose import __version__, encode, io, pipeline, verify
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
-from vr_compose.stitch import DEFAULT_BAND_ROWS, stitch_frame
+from vr_compose.stitch import DEFAULT_BAND_ROWS, DEFAULT_SAMPLER, SAMPLERS, stitch_frame
 from vr_compose.warp import DEFAULT_THREADS
 
 
@@ -147,7 +147,7 @@ def cmd_frame(args: argparse.Namespace) -> int:
     tiles = io.load_tiles(chosen, frame, indices, workers=args.decode_workers)
     decoded = time.time() - started
 
-    result = stitch_frame(tiles, rig, width, band_rows=args.band_rows)
+    result = stitch_frame(tiles, rig, width, band_rows=args.band_rows, sampler=args.sampler)
     elapsed = time.time() - started
     print(
         f"stitched   : frame {frame} at {width}x{width // 2} in {elapsed:.1f} s "
@@ -156,7 +156,7 @@ def cmd_frame(args: argparse.Namespace) -> int:
     )
     print(f"wrap seam  : {verify.wrap_seam_error(result.image):.2f} / 255")
     report = verify.agreement(result.stats)
-    print(report.report())
+    print(report.report(args.sampler))
 
     if args.out is not None:
         size = io.write_png(args.out, result.image, compress_level=args.compress_level)
@@ -223,6 +223,7 @@ def cmd_master(
             compress_level=args.compress_level,
             decode_workers=args.decode_workers,
             warp_threads=args.warp_threads,
+            sampler=args.sampler,
             write_workers=args.write_workers,
             stats_every=args.stats_every,
             resume=not args.no_resume,
@@ -234,7 +235,10 @@ def cmd_master(
     print(f"source     : {chosen.root}  stem {chosen.stem!r}")
     print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
     print(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
-    print(f"master     : {width}x{width // 2} PNG, compress_level {job.compress_level}")
+    print(
+        f"master     : {width}x{width // 2} PNG, compress_level {job.compress_level}, "
+        f"sampler {job.sampler}"
+    )
     print(f"output     : {job.directory}")
 
     bar = tqdm(
@@ -338,6 +342,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             segment_gops=args.segment_gops,
             decode_workers=args.decode_workers,
             warp_threads=args.warp_threads,
+            sampler=args.sampler,
             stats_every=args.stats_every,
             resume=not args.no_resume,
             keep_segments=args.keep_segments,
@@ -351,6 +356,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), "
         f"{len(job.segments())} segment(s) of up to {job.segment_frames}"
     )
+    print(f"sampler    : {args.sampler}")
     print(f"encode     : {spec.describe()}")
     print(f"output     : {job.output}")
 
@@ -465,6 +471,12 @@ def build_parser() -> argparse.ArgumentParser:
     frame.add_argument("--compress-level", type=int, default=6, choices=range(10))
     frame.add_argument("--band-rows", type=int, default=DEFAULT_BAND_ROWS)
     frame.add_argument("--decode-workers", type=int, default=8)
+    frame.add_argument(
+        "--sampler",
+        choices=list(SAMPLERS),
+        default=DEFAULT_SAMPLER,
+        help="how a tile is read at a fractional position; 'nearest' is the P1 baseline",
+    )
     frame.set_defaults(func=cmd_frame)
 
     sequence = sub.add_parser("sequence", help="stitch a frame range straight into a delivery MP4")
@@ -516,6 +528,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="threads decoding the next frame; more than 4 slows the warp (GIL contention)",
     )
     sequence.add_argument("--warp-threads", type=int, default=DEFAULT_THREADS)
+    sequence.add_argument(
+        "--sampler",
+        choices=list(SAMPLERS),
+        default=DEFAULT_SAMPLER,
+        help="'bilinear' (default) interpolates; 'nearest' is the P1 baseline, faster but "
+        "it places every sample up to half a pixel out",
+    )
     sequence.add_argument(
         "--encoder-threads",
         type=int,

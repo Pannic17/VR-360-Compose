@@ -44,6 +44,7 @@ import numpy.typing as npt
 from vr_compose import encode, io, memory, verify
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
+from vr_compose.stitch import DEFAULT_SAMPLER
 from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 
 U8 = npt.NDArray[np.uint8]
@@ -171,6 +172,8 @@ class SequenceJob:
     contending for the GIL between numpy calls. 4 decode + 8 warp threads measured best
     at 8K (2.48 s/frame end to end)."""
     warp_threads: int = DEFAULT_THREADS
+    sampler: str = DEFAULT_SAMPLER
+    """How a tile is read at a fractional position; see :data:`vr_compose.stitch.SAMPLERS`."""
     stats_every: int = 100
     """Run the geometry gate on frames 0, N, 2N, ... of the job."""
     resume: bool = True
@@ -364,9 +367,16 @@ def run_sequence(
     master = (job.spec.master_width, job.spec.master_height)
     if plan is None:
         say("building warp plan ...")
-        plan = WarpPlan.build(job.rig, *master, tile_size)
-        say(f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB)")
-    elif (plan.width, plan.height, plan.tile_size) != (*master, tile_size):
+        plan = WarpPlan.build(job.rig, *master, tile_size, sampler=job.sampler)
+        say(
+            f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB, "
+            f"{plan.sampler})"
+        )
+    elif (plan.width, plan.height, plan.tile_size, plan.sampler) != (
+        *master,
+        tile_size,
+        job.sampler,
+    ):
         raise ValueError("the supplied warp plan does not match this job")
 
     indices = list(job.rig.unique_indices)
@@ -554,6 +564,7 @@ class MasterJob:
     the bytes. The *pixels* are identical either way -- only the file differs."""
     decode_workers: int = 4
     warp_threads: int = DEFAULT_THREADS
+    sampler: str = DEFAULT_SAMPLER
     write_workers: int = 1
     """PNG encodes in flight.
 
@@ -646,9 +657,17 @@ def run_master(
 
     if plan is None:
         say("building warp plan ...")
-        plan = WarpPlan.build(job.rig, job.width, job.height, tile_size)
-        say(f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB)")
-    elif (plan.width, plan.height, plan.tile_size) != (job.width, job.height, tile_size):
+        plan = WarpPlan.build(job.rig, job.width, job.height, tile_size, sampler=job.sampler)
+        say(
+            f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB, "
+            f"{plan.sampler})"
+        )
+    elif (plan.width, plan.height, plan.tile_size, plan.sampler) != (
+        job.width,
+        job.height,
+        tile_size,
+        job.sampler,
+    ):
         raise ValueError("the supplied warp plan does not match this job")
 
     indices = list(job.rig.unique_indices)

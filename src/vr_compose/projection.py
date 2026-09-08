@@ -24,6 +24,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
+F32 = npt.NDArray[np.float32]
 F64 = npt.NDArray[np.float64]
 I32 = npt.NDArray[np.int32]
 Bool = npt.NDArray[np.bool_]
@@ -35,7 +36,9 @@ __all__ = [
     "project_to_tile",
     "rot_y",
     "rot_z",
+    "tile_bilinear_taps",
     "tile_pixel_index",
+    "tile_pixel_position",
     "tile_rays",
 ]
 
@@ -132,10 +135,50 @@ def project_to_tile(
 def tile_pixel_index(x: F64, y: F64, size: int, fov_deg: float) -> tuple[I32, I32]:
     """Normalised image-plane coordinates -> nearest pixel ``(column, row)``.
 
-    Nearest neighbour is the P1 sampler. P4 replaces it with an anisotropic filter; the
-    interface stays because the LUT stores the same coordinates either way.
+    Nearest neighbour is the P1 sampler, kept as the byte-exact baseline the LUT is
+    verified against (AGENTS.md §9 metric D). :func:`tile_bilinear_taps` is the P4 one.
     """
     t = half_extent(fov_deg)
     column = np.clip(((x / t + 1.0) * 0.5 * size).astype(np.int32), 0, size - 1)
     row = np.clip(((y / t + 1.0) * 0.5 * size).astype(np.int32), 0, size - 1)
     return np.asarray(column, np.int32), np.asarray(row, np.int32)
+
+
+def tile_pixel_position(x: F64, y: F64, size: int, fov_deg: float) -> tuple[F64, F64]:
+    """Continuous tile coordinates whose **integers land on pixel centres**.
+
+    :func:`tile_pixel_index` works in a coordinate where pixel `i` covers ``[i, i+1)``;
+    subtracting the half pixel moves the origin onto the first pixel's centre, which is
+    the frame an interpolating filter needs. Rounding this reproduces
+    :func:`tile_pixel_index` exactly, so the two samplers agree on where a sample *is*
+    and differ only in how they read it.
+    """
+    t = half_extent(fov_deg)
+    return (x / t + 1.0) * 0.5 * size - 0.5, (y / t + 1.0) * 0.5 * size - 0.5
+
+
+def tile_bilinear_taps(x: F64, y: F64, size: int, fov_deg: float) -> tuple[I32, I32, F32, F32]:
+    """Bilinear sampling taps: ``(column, row, fx, fy)`` for the top-left of a 2x2.
+
+    The other three taps are `column + 1` and `row + 1`, always in bounds because the
+    top-left is clamped to ``size - 2``. That clamping makes the outer half pixel of each
+    border sample the border pair instead of extrapolating -- which costs nothing here,
+    because :func:`vr_compose.stitch._feather` has already driven the blend weight to
+    zero at exactly those positions.
+
+    The fractions come back **float32**, not float64: the LUT stores float32, and the
+    plan has to agree with the per-frame stitcher bit for bit (metric D). Rounding once,
+    here, is what makes that true. A float32 fraction resolves about 1e-7 of a pixel,
+    some five orders finer than the 8-bit samples it weights.
+    """
+    column, row = tile_pixel_position(x, y, size, fov_deg)
+    left = np.clip(np.floor(column), 0, max(size - 2, 0))
+    top = np.clip(np.floor(row), 0, max(size - 2, 0))
+    fx = np.clip(column - left, 0.0, 1.0).astype(np.float32)
+    fy = np.clip(row - top, 0.0, 1.0).astype(np.float32)
+    return (
+        np.asarray(left, np.int32),
+        np.asarray(top, np.int32),
+        np.asarray(fx, np.float32),
+        np.asarray(fy, np.float32),
+    )

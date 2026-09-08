@@ -8,9 +8,14 @@ and a weighted accumulate.
 
 **The plan must reproduce :func:`vr_compose.stitch.stitch_bands` bit for bit.** It uses
 the same helpers in the same order with the same dtypes, and `tests/test_warp.py` asserts
-byte equality on synthetic tiles. Any future speed-up (numba, GPU, a different layout)
-has to keep that property or explicitly re-baseline; P1's verified geometry is the
-reference, not this module.
+byte equality on synthetic tiles -- **per sampler**, since P4 made the sampler a choice.
+Any future speed-up (numba, GPU, a different layout) has to keep that property or
+explicitly re-baseline; P1's verified geometry is the reference, not this module.
+
+A `bilinear` plan costs 20 bytes an entry against `nearest`'s 12 -- 1.37 GiB against
+843 MiB at 8K -- and four gathers instead of one. It stores the top-left tap plus the two
+sub-pixel fractions; precomputing all four taps and their four weights instead would be
+40 bytes an entry for arithmetic that is two multiplies.
 
 Layout: one contributor list per tile, sorted by output pixel. Output writes are then
 monotonic and cache-friendly while the random reads stay inside a single tile, which
@@ -34,9 +39,12 @@ from vr_compose.rig import Rig
 from vr_compose.stitch import (
     _EPSILON,
     DEFAULT_BAND_ROWS,
+    DEFAULT_SAMPLER,
+    SAMPLERS,
     BandStats,
     StitchResult,
     _feather,
+    bilinear_blend,
     luma_bt709,
 )
 
@@ -46,7 +54,7 @@ U8 = npt.NDArray[np.uint8]
 
 __all__ = ["PLAN_FORMAT", "TileContributors", "WarpPlan", "plan_fingerprint"]
 
-PLAN_FORMAT = 1
+PLAN_FORMAT = 2
 """Bump when the on-disk layout changes; stale caches are then rejected, not misread."""
 
 DEFAULT_THREADS = 8
@@ -56,7 +64,9 @@ contends for the GIL, 8 threads beat 4 (2.2 s vs 2.8 s with 8 decode workers; 1.
 2.07 s with 4). The decode pool's size matters as much -- see `SequenceJob.decode_workers`."""
 
 
-def plan_fingerprint(rig: Rig, width: int, height: int, tile_size: int) -> str:
+def plan_fingerprint(
+    rig: Rig, width: int, height: int, tile_size: int, sampler: str = DEFAULT_SAMPLER
+) -> str:
     """Identifies everything the plan depends on. Same fingerprint, same numbers."""
     payload = {
         "format": PLAN_FORMAT,
@@ -67,6 +77,7 @@ def plan_fingerprint(rig: Rig, width: int, height: int, tile_size: int) -> str:
         "width": width,
         "height": height,
         "tile": tile_size,
+        "sampler": sampler,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return digest[:16]
@@ -80,8 +91,17 @@ class TileContributors:
     out_index: I32
     """Flat output pixel index, ascending."""
     src_index: I32
-    """Flat tile pixel index (row * size + column)."""
+    """Flat tile pixel index (row * size + column).
+
+    For `bilinear` this is the *top-left* of the 2x2; the other three taps are
+    `+ 1`, `+ size` and `+ size + 1`, always in bounds because
+    :func:`vr_compose.projection.tile_bilinear_taps` clamps the top-left to `size - 2`.
+    Storing the top-left plus two fractions is 20 bytes an entry; four indices and four
+    precomputed tap weights would be 40, to save two multiplies."""
     weight: F32
+    fx: F32 = dataclasses.field(default_factory=lambda: np.zeros(0, np.float32))
+    """Sub-pixel offsets, `bilinear` only. Empty for `nearest`."""
+    fy: F32 = dataclasses.field(default_factory=lambda: np.zeros(0, np.float32))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -92,6 +112,7 @@ class WarpPlan:
     fingerprint: str
     tiles: tuple[TileContributors, ...]
     build_seconds: float
+    sampler: str = DEFAULT_SAMPLER
 
     @property
     def entries(self) -> int:
@@ -99,7 +120,10 @@ class WarpPlan:
 
     @property
     def nbytes(self) -> int:
-        return sum(t.out_index.nbytes + t.src_index.nbytes + t.weight.nbytes for t in self.tiles)
+        return sum(
+            t.out_index.nbytes + t.src_index.nbytes + t.weight.nbytes + t.fx.nbytes + t.fy.nbytes
+            for t in self.tiles
+        )
 
     @classmethod
     def build(
@@ -110,16 +134,19 @@ class WarpPlan:
         tile_size: int,
         *,
         band_rows: int = DEFAULT_BAND_ROWS,
+        sampler: str = DEFAULT_SAMPLER,
     ) -> WarpPlan:
         """Evaluate the geometry once. Mirrors :func:`stitch_bands` step for step."""
         if width != 2 * height:
             raise ValueError(f"equirect output must be 2:1, got {width}x{height}")
         if tile_size < 1:
             raise ValueError(f"tile size must be positive, got {tile_size}")
+        if sampler not in SAMPLERS:
+            raise ValueError(f"sampler must be one of {SAMPLERS}, got {sampler!r}")
         started = time.time()
         half = projection.half_extent(rig.fov_deg)
         views = rig.unique_views
-        chunks: dict[int, list[tuple[I32, I32, F32]]] = {index: [] for index in views}
+        chunks: dict[int, list[tuple[I32, I32, F32, F32, F32]]] = {index: [] for index in views}
 
         for start in range(0, height, max(1, band_rows)):
             stop = min(start + band_rows, height)
@@ -131,21 +158,37 @@ class WarpPlan:
                 )
                 if not visible.any():
                     continue
-                column, row = projection.tile_pixel_index(
-                    x[visible], y[visible], tile_size, rig.fov_deg
-                )
+                empty = np.zeros(0, np.float32)
+                if sampler == "nearest":
+                    column, row = projection.tile_pixel_index(
+                        x[visible], y[visible], tile_size, rig.fov_deg
+                    )
+                    fx, fy = empty, empty
+                else:
+                    column, row, fx, fy = projection.tile_bilinear_taps(
+                        x[visible], y[visible], tile_size, rig.fov_deg
+                    )
                 out_index = (np.flatnonzero(visible) + base).astype(np.int32)
                 src_index = (row.astype(np.int32) * tile_size + column.astype(np.int32)).astype(
                     np.int32
                 )
-                chunks[index].append((out_index, src_index, _feather(x[visible], y[visible], half)))
+                chunks[index].append(
+                    (out_index, src_index, _feather(x[visible], y[visible], half), fx, fy)
+                )
+
+        def joined(parts: list[tuple[I32, I32, F32, F32, F32]], column: int, dtype: type) -> object:
+            if not parts:
+                return np.zeros(0, dtype)
+            return np.concatenate([part[column] for part in parts])
 
         tiles = tuple(
             TileContributors(
                 camera=index,
-                out_index=np.concatenate([c[0] for c in parts]) if parts else np.zeros(0, np.int32),
-                src_index=np.concatenate([c[1] for c in parts]) if parts else np.zeros(0, np.int32),
-                weight=np.concatenate([c[2] for c in parts]) if parts else np.zeros(0, np.float32),
+                out_index=joined(parts, 0, np.int32),  # type: ignore[arg-type]
+                src_index=joined(parts, 1, np.int32),  # type: ignore[arg-type]
+                weight=joined(parts, 2, np.float32),  # type: ignore[arg-type]
+                fx=joined(parts, 3, np.float32),  # type: ignore[arg-type]
+                fy=joined(parts, 4, np.float32),  # type: ignore[arg-type]
             )
             for index, parts in chunks.items()
         )
@@ -153,9 +196,10 @@ class WarpPlan:
             width=width,
             height=height,
             tile_size=tile_size,
-            fingerprint=plan_fingerprint(rig, width, height, tile_size),
+            fingerprint=plan_fingerprint(rig, width, height, tile_size, sampler),
             tiles=tiles,
             build_seconds=time.time() - started,
+            sampler=sampler,
         )
 
     def _validate(self, tiles: dict[int, U8]) -> None:
@@ -208,7 +252,25 @@ class WarpPlan:
                     continue
                 out_index = tile.out_index[start:stop]
                 w = tile.weight[start:stop]
-                sampled = flat[tile.camera][tile.src_index[start:stop]].astype(np.float32)
+                source = flat[tile.camera]
+                src_index = tile.src_index[start:stop]
+                if self.sampler == "nearest":
+                    sampled = source[src_index].astype(np.float32)
+                else:
+                    # The 2x2 neighbours are index arithmetic on a flattened tile, which
+                    # is why the plan stores one index and two fractions. The top-left is
+                    # clamped at build time so `+ size + 1` cannot leave the tile.
+                    step = self.tile_size
+                    sampled = bilinear_blend(
+                        (
+                            source[src_index].astype(np.float32),
+                            source[src_index + 1].astype(np.float32),
+                            source[src_index + step].astype(np.float32),
+                            source[src_index + step + 1].astype(np.float32),
+                        ),
+                        tile.fx[start:stop],
+                        tile.fy[start:stop],
+                    )
                 colour[out_index] += sampled * w[:, None]
                 weight[out_index] += w
                 if with_stats:
@@ -234,6 +296,8 @@ class WarpPlan:
             arrays[f"out_{i}"] = tile.out_index
             arrays[f"src_{i}"] = tile.src_index
             arrays[f"w_{i}"] = tile.weight
+            arrays[f"fx_{i}"] = tile.fx
+            arrays[f"fy_{i}"] = tile.fy
         meta = {
             "format": PLAN_FORMAT,
             "fingerprint": self.fingerprint,
@@ -242,6 +306,7 @@ class WarpPlan:
             "tile_size": self.tile_size,
             "cameras": [t.camera for t in self.tiles],
             "build_seconds": self.build_seconds,
+            "sampler": self.sampler,
         }
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode(), np.uint8)
         # numpy's stub types **kwds against `allow_pickle: bool`; the arrays are fine.
@@ -266,6 +331,8 @@ class WarpPlan:
                     out_index=np.asarray(archive[f"out_{i}"], np.int32),
                     src_index=np.asarray(archive[f"src_{i}"], np.int32),
                     weight=np.asarray(archive[f"w_{i}"], np.float32),
+                    fx=np.asarray(archive[f"fx_{i}"], np.float32),
+                    fy=np.asarray(archive[f"fy_{i}"], np.float32),
                 )
                 for i, camera in enumerate(meta["cameras"])
             )
@@ -276,4 +343,5 @@ class WarpPlan:
             fingerprint=str(meta["fingerprint"]),
             tiles=tiles,
             build_seconds=float(meta["build_seconds"]),
+            sampler=str(meta["sampler"]),
         )

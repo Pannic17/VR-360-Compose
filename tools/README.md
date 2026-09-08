@@ -13,6 +13,7 @@
 | `inspect_data.py` | §4 数据布局、§8 上一代性能基线、alpha、重复文件 | 数秒（`--skip-duplicates`）/ 约 1 分钟 |
 | `fit_rig.py` | §3 装配反解；**也是遇到未登记布局时的求解工具** | 每相机约 30 s |
 | `coverage_map.py` | §3 球面覆盖与采样密度 | 数秒 |
+| `resample_probe.py` | §3「重采样到底在做什么」—— 映射的雅可比，决定 P4 的滤波器 | 数秒 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池 | 每种配置约 90 s 构建 |
 
@@ -32,6 +33,17 @@
 ```bash
 .\.venv\Scripts\python.exe tools\coverage_map.py
 ```
+
+```bash
+.\.venv\Scripts\python.exe toolsesample_probe.py
+.\.venv\Scripts\python.exe toolsesample_probe.py --tile 3840 --output-width 7680
+```
+
+`resample_probe.py` 是 P4 加的，回答的是 `coverage_map.py` 回答不了的那个问题：
+每个输出像素上，映射是在**缩小**源（会走样，要预滤波）还是在**放大**（要好的插值核），
+以及有多各向异性。**它推翻了 P4 原本的 mip/EWA 设计** —— 原生密度下两轴同时缩小的方向只占 0.1%。
+注意 `coverage_map.py` 里那个 `cos³θ`「密度」是**每源像素占的立体角**，越小表示源越密，
+它自己的注释和 AGENTS.md 旧文把方向读反了（P4 已更正）。
 
 ```bash
 .\.venv\Scripts\python.exe -m vr_compose --source E:/22 frame --frame 1656 --width 3840
@@ -72,6 +84,8 @@ median 0.68   mean 1.02   p95 3.10   std>8 = 0.25%
 跑 `inspect_data.py` 应当得到 `46.85 s/frame`、`69.27 GiB`、`91.1 → 68.3 MiB/frame`。
 跑 `coverage_map.py` 应当得到覆盖率 `2 tiles 61.19% / 3 tiles 27.53% / 4 tiles 11.25%`
 与密度 `min 0.355 / p5 0.433 / median 0.781`。
+跑 `resample_probe.py` 应当得到原生密度下 σ_min 中位数 0.82（赤道）/ 0.06（极冠）、
+两轴同时缩小的方向占 0.1%；`--tile 3840 --output-width 7680` 则是 100% 在缩小。
 跑 `encode_probe.py matrix` 应当 12 种组合全部 `OK`，且等级为
 8k H.264 6.0 / 8k H.265 6.2(6.1@100k) / 4k H.264 5.1 / 4k H.265 Main tier 5.2(5.1@28k)。
 等级与档位从 `vr_compose.encode` 导入，工具里没有第二份表。

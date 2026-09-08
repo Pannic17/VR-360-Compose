@@ -5,9 +5,13 @@ that looks entirely plausible in a thumbnail. The only reliable check is that ov
 tiles agree with each other, which needs no reference frame and is immune to scene motion
 (AGENTS.md §9, metric A).
 
-Reference values for the 20-file rig with nearest-neighbour sampling at 3840x1920 are in
-:data:`BASELINE`. They are a regression baseline: if a change moves them, either the
-change is an improvement worth re-recording or it is a bug.
+Reference values for the 20-file rig at 3840x1920 are in :data:`BASELINES`, one set per
+sampler. They are a regression baseline: if a change moves them, either the change is an
+improvement worth re-recording or it is a bug.
+
+The gate thresholds are deliberately *not* tightened to match the better sampler: the
+gate answers "is the rig upside down", where the failure signal is tens of levels, and it
+has to pass for the cheap preview sampler too.
 """
 
 from __future__ import annotations
@@ -17,12 +21,13 @@ import dataclasses
 import numpy as np
 import numpy.typing as npt
 
-from vr_compose.stitch import BandStats
+from vr_compose.stitch import DEFAULT_SAMPLER, BandStats
 
 F32 = npt.NDArray[np.float32]
 
 __all__ = [
     "BASELINE",
+    "BASELINES",
     "GATE_MAX_MEAN",
     "GATE_MAX_MEDIAN",
     "Agreement",
@@ -30,14 +35,29 @@ __all__ = [
     "wrap_seam_error",
 ]
 
-BASELINE = {"median": 0.68, "mean": 1.02, "p95": 3.10, "fraction_over_8": 0.0025}
-"""Measured by this code on frame 1656 of the reference data, 3840x1920, nearest neighbour.
+BASELINES = {
+    "nearest": {"median": 0.68, "mean": 1.02, "p95": 3.10, "fraction_over_8": 0.0025},
+    "bilinear": {"median": 0.48, "mean": 0.77, "p95": 2.52, "fraction_over_8": 0.00037},
+}
+"""Measured by this code on frame 1656 of the reference data, 3840x1920, per sampler.
 
-Slightly under the 0.70/1.04/3.14/0.26% first recorded in AGENTS.md §9, which came from a
-probe script using BT.601 luma weights; this module uses BT.709 to match the colour space
-the delivery spec tags. At 7680x3840 the median is 0.67 -- the metric is mildly
-resolution-dependent, so compare like with like.
+**A quarter of what this metric used to report was our own sampler.** Switching to
+bilinear (P4) moved the median from 0.68 to 0.48, the mean from 1.02 to 0.77 and the
+share of directions disagreeing by more than 8 levels from 0.25% to **0.037%** -- a 6.8x
+drop in the outliers. Nearest neighbour places each sample up to half a pixel from where
+it belongs, and two tiles rounding a shared direction in different directions disagree by
+whatever the image gradient is across that offset. What is left is closer to the floor the
+source itself sets (TAA jitter, up to 1 level between tiles, AGENTS.md §3).
+
+The nearest figures are slightly under the 0.70/1.04/3.14/0.26% first recorded in
+AGENTS.md §9, which came from a probe script using BT.601 luma weights; this module uses
+BT.709 to match the colour space the delivery spec tags. At 7680x3840 the medians are
+0.67 and 0.48 -- mildly resolution-dependent for nearest, essentially flat for bilinear,
+so compare like with like.
 """
+
+BASELINE = BASELINES[DEFAULT_SAMPLER]
+"""The default sampler's baseline, for callers that do not care which one ran."""
 
 GATE_MAX_MEDIAN = 1.0
 GATE_MAX_MEAN = 1.5
@@ -59,14 +79,16 @@ class Agreement:
     def passed(self) -> bool:
         return self.median <= GATE_MAX_MEDIAN and self.mean <= GATE_MAX_MEAN
 
-    def report(self) -> str:
+    def report(self, sampler: str = DEFAULT_SAMPLER) -> str:
+        baseline = BASELINES.get(sampler, BASELINE)
         lines = [
             f"overlap    : {self.overlap_pixels} pixels, up to {self.max_contributors} tiles",
-            f"median     : {self.median:6.2f}   (baseline {BASELINE['median']:.2f})",
-            f"mean       : {self.mean:6.2f}   (baseline {BASELINE['mean']:.2f})",
-            f"p95        : {self.p95:6.2f}   (baseline {BASELINE['p95']:.2f})",
-            f"std > 8    : {self.fraction_over_8:6.2%}   "
-            f"(baseline {BASELINE['fraction_over_8']:.2%})",
+            f"sampler    : {sampler}",
+            f"median     : {self.median:6.2f}   (baseline {baseline['median']:.2f})",
+            f"mean       : {self.mean:6.2f}   (baseline {baseline['mean']:.2f})",
+            f"p95        : {self.p95:6.2f}   (baseline {baseline['p95']:.2f})",
+            f"std > 8    : {self.fraction_over_8:6.3%}   "
+            f"(baseline {baseline['fraction_over_8']:.3%})",
             f"verdict    : {'PASS' if self.passed else 'FAIL'}   "
             f"(gate: median <= {GATE_MAX_MEDIAN}, mean <= {GATE_MAX_MEAN})",
         ]

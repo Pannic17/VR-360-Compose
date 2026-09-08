@@ -33,7 +33,32 @@ F32 = npt.NDArray[np.float32]
 F64 = npt.NDArray[np.float64]
 U8 = npt.NDArray[np.uint8]
 
-__all__ = ["BandStats", "StitchResult", "stitch_bands", "stitch_frame"]
+__all__ = [
+    "DEFAULT_SAMPLER",
+    "SAMPLERS",
+    "BandStats",
+    "StitchResult",
+    "bilinear_blend",
+    "stitch_bands",
+    "stitch_frame",
+]
+
+SAMPLERS = ("nearest", "bilinear")
+DEFAULT_SAMPLER = "bilinear"
+"""How a tile is read at a fractional position.
+
+`nearest` is P1's, kept because it is the byte-exact baseline the LUT is verified against
+(AGENTS.md section 9, metric D) and because it is the cheapest preview.
+
+`bilinear` is P4's default. The choice is measured, not conventional: `tools/
+resample_probe.py` reports that at native density the map **magnifies** almost
+everywhere -- the minor scale factor is below 1 in every latitude band (median 0.82 at
+the equator, 0.06 at the pole cap) and only 0.1% of directions are minified in both axes.
+Under magnification there is nothing to prefilter, so the mip/EWA machinery P4 was
+originally sketched with would only blur; what nearest actually costs is up to half a
+pixel of positional error, which shows up as replicated blocks. Interpolation is the fix
+for that, and bilinear is the whole of it wherever the footprint is near-isotropic.
+"""
 
 LUMA_BT709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
@@ -110,6 +135,21 @@ class StitchResult:
         return float((self.stats.count >= 2).mean())
 
 
+def bilinear_blend(taps: tuple[F32, F32, F32, F32], fx: F32, fy: F32) -> F32:
+    """Blend a 2x2 neighbourhood, `(top-left, top-right, bottom-left, bottom-right)`.
+
+    Elementwise float32 in a fixed order, for the same reason :func:`luma_bt709` is: the
+    LUT path and the per-frame path must produce identical bits, and anything that lets
+    the summation order vary with array length breaks that.
+    """
+    top_left, top_right, bottom_left, bottom_right = taps
+    one = np.float32(1.0)
+    wx, wy = fx[:, None], fy[:, None]
+    top = top_left * (one - wx) + top_right * wx
+    bottom = bottom_left * (one - wx) + bottom_right * wx
+    return np.asarray(top * (one - wy) + bottom * wy, dtype=np.float32)
+
+
 def _feather(x: F64, y: F64, half: float) -> F32:
     """Blend weight falling to zero at the tile border.
 
@@ -129,6 +169,7 @@ def stitch_bands(
     height: int,
     *,
     band_rows: int = DEFAULT_BAND_ROWS,
+    sampler: str = DEFAULT_SAMPLER,
 ) -> StitchResult:
     """Blend `tiles` into a ``height x width x 3`` panorama, one horizontal band at a time.
 
@@ -138,6 +179,8 @@ def stitch_bands(
     """
     if width != 2 * height:
         raise ValueError(f"equirect output must be 2:1, got {width}x{height}")
+    if sampler not in SAMPLERS:
+        raise ValueError(f"sampler must be one of {SAMPLERS}, got {sampler!r}")
     views = rig.unique_views
     missing = sorted(set(views) - set(tiles))
     if missing:
@@ -170,10 +213,26 @@ def stitch_bands(
             )
             if not visible.any():
                 continue
-            column, row = projection.tile_pixel_index(
-                x[visible], y[visible], tile_size, rig.fov_deg
-            )
-            sampled = tiles[index][row, column].astype(np.float32)
+            tile = tiles[index]
+            if sampler == "nearest":
+                column, row = projection.tile_pixel_index(
+                    x[visible], y[visible], tile_size, rig.fov_deg
+                )
+                sampled = tile[row, column].astype(np.float32)
+            else:
+                column, row, fx, fy = projection.tile_bilinear_taps(
+                    x[visible], y[visible], tile_size, rig.fov_deg
+                )
+                sampled = bilinear_blend(
+                    (
+                        tile[row, column].astype(np.float32),
+                        tile[row, column + 1].astype(np.float32),
+                        tile[row + 1, column].astype(np.float32),
+                        tile[row + 1, column + 1].astype(np.float32),
+                    ),
+                    fx,
+                    fy,
+                )
             w = _feather(x[visible], y[visible], half)
             colour[visible] += sampled * w[:, None]
             weight[visible] += w
@@ -194,9 +253,14 @@ def stitch_bands(
 
 
 def stitch_frame(
-    tiles: dict[int, U8], rig: Rig, width: int, *, band_rows: int = DEFAULT_BAND_ROWS
+    tiles: dict[int, U8],
+    rig: Rig,
+    width: int,
+    *,
+    band_rows: int = DEFAULT_BAND_ROWS,
+    sampler: str = DEFAULT_SAMPLER,
 ) -> StitchResult:
     """:func:`stitch_bands` with the 2:1 height implied by `width`."""
     if width % 2:
         raise ValueError(f"equirect width must be even, got {width}")
-    return stitch_bands(tiles, rig, width, width // 2, band_rows=band_rows)
+    return stitch_bands(tiles, rig, width, width // 2, band_rows=band_rows, sampler=sampler)
