@@ -185,3 +185,64 @@ def test_a_cancelled_run_exits_130_not_as_a_failure(
     err = capsys.readouterr().err
     assert "interrupted" in err and "resume" in err
     assert "cancelled after 7 of 99" in err, "say how far it got"
+
+
+def _png_source(root: pathlib.Path) -> None:
+    rig = twenty_file_rig()
+    panorama = analytic_panorama(256, 128)
+    make_source_tree(
+        root,
+        cameras=20,
+        stem="S",
+        frames=[1, 2],
+        size=(64, 64),
+        tile_for=lambda camera, _frame: sample_panorama_into_tile(panorama, rig, camera, 64),
+    )
+
+
+def test_png_masters_land_at_the_native_density(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--out` is a directory here, and the width follows the tiles, not `--size`."""
+    _png_source(tmp_path / "src")
+    out = tmp_path / "masters"
+    code = main(
+        ["--source", str(tmp_path / "src"), "sequence", "--out-format", "png",
+         "--out", str(out), "--no-bar"]
+    )  # fmt: skip
+    assert code == 0
+    assert sorted(p.name for p in out.glob("*.png")) == ["S.0001.png", "S.0002.png"]
+    printed = capsys.readouterr().out
+    assert "master     : 256x128 PNG" in printed, printed
+    assert "2 master(s)" in printed
+
+
+def test_delivery_options_are_refused_for_png_masters(tmp_path: pathlib.Path) -> None:
+    """Refuse rather than ignore (AGENTS.md section 10): silently dropping --codec would
+    let someone believe they had chosen something."""
+    _png_source(tmp_path / "src")
+    base = ["--source", str(tmp_path / "src"), "sequence", "--out-format", "png", "--no-bar"]
+    for extra in (["--codec", "h265"], ["--size", "4k"], ["--fps", "60"], ["--bitrate", "low"]):
+        with pytest.raises(SystemExit) as caught:
+            main([*base, *extra])
+        assert "only apply to --out-format mp4" in str(caught.value), extra
+    # passing a default value explicitly is not "asking for" anything
+    assert main([*base, "--codec", "h264", "--out", str(tmp_path / "m")]) == 0
+
+
+def test_master_options_are_refused_for_mp4(tmp_path: pathlib.Path) -> None:
+    _png_source(tmp_path / "src")
+    with pytest.raises(SystemExit) as caught:
+        main(
+            ["--source", str(tmp_path / "src"), "sequence", "--compress-level", "9", "--no-bar"]
+        )  # fmt: skip
+    assert "only apply to --out-format png" in str(caught.value)
+
+
+def test_exr_says_why_it_is_not_implemented(tmp_path: pathlib.Path) -> None:
+    """The interface is reserved; the reason it is empty is a source-side fact."""
+    _png_source(tmp_path / "src")
+    with pytest.raises(SystemExit) as caught:
+        main(["--source", str(tmp_path / "src"), "sequence", "--out-format", "exr", "--no-bar"])
+    message = str(caught.value)
+    assert "8-bit" in message and "--out-format png" in message

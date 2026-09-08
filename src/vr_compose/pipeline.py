@@ -1,4 +1,10 @@
-"""Sequence job: decode -> warp -> encode, resumable, one MP4 out.
+"""Sequence jobs: decode -> warp -> sink, resumable. One MP4 out, or PNG masters.
+
+Two sinks share one core. :func:`run_sequence` is the delivery path -- straight into
+ffmpeg, no intermediate file. :func:`run_master` is the archival one, a lossless PNG per
+frame, which P4 needs to compare quality against. Both get their frames from
+:func:`_prefetch_tiles` and :func:`_stitch_one`, so the geometry, the decode overlap and
+the sampled gate are the same code in both.
 
 Three decisions shape this module (ROADMAP P2):
 
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
 import pathlib
 import shutil
@@ -44,10 +51,13 @@ U8 = npt.NDArray[np.uint8]
 __all__ = [
     "Cancelled",
     "GeometryGateFailed",
+    "MasterJob",
+    "MasterSummary",
     "Progress",
     "SequenceJob",
     "Summary",
     "parse_frames",
+    "run_master",
     "run_sequence",
 ]
 
@@ -273,6 +283,39 @@ class Summary:
         return self.seconds / self.encoded if self.encoded else 0.0
 
 
+def _prefetch_tiles(
+    pool: concurrent.futures.ThreadPoolExecutor,
+    load: Callable[[int], dict[int, U8]],
+    frames: Sequence[int],
+) -> Iterable[tuple[int, dict[int, U8], float]]:
+    """Yield `(frame, tiles, seconds blocked)`, decoding the next frame while you work.
+
+    One frame of lookahead, which is all that is useful: at 8K the 15 decodes take about
+    0.3 s against a 1.9 s warp, so the measured wait is 0.01 s. Shared by the MP4 and the
+    master paths so both get the overlap and neither reimplements it.
+    """
+    if not frames:
+        return
+    pending = pool.submit(load, frames[0])
+    for position, frame in enumerate(frames):
+        tick = time.time()
+        tiles = pending.result()
+        if position + 1 < len(frames):
+            pending = pool.submit(load, frames[position + 1])
+        yield frame, tiles, time.time() - tick
+
+
+def _stitch_one(
+    plan: WarpPlan, tiles: dict[int, U8], *, threads: int, gate: bool
+) -> tuple[U8, verify.Agreement | None, float, float]:
+    """One frame: `(image, gate report or None, warp seconds, gate seconds)`."""
+    started = time.time()
+    result = plan.apply(tiles, with_stats=gate, threads=threads)
+    warped = time.time()
+    report = verify.agreement(result.stats) if gate else None
+    return result.image, report, warped - started, time.time() - warped
+
+
 def _check_disk(job: SequenceJob) -> None:
     target = job.output.parent
     target.mkdir(parents=True, exist_ok=True)
@@ -362,38 +405,34 @@ def run_sequence(
                 continue
 
             writer = encode.SegmentWriter(tools, job.spec, path)
-            pending = prefetch.submit(decode, seg_frames[0])
             try:
-                for position, frame in enumerate(seg_frames):
+                for frame, tiles, waited in _prefetch_tiles(prefetch, decode, seg_frames):
                     if stop.is_set():
                         raise Cancelled(f"cancelled after {done} of {total} frame(s)")
-                    tick = time.time()
-                    tiles = pending.result()
-                    if position + 1 < len(seg_frames):
-                        pending = prefetch.submit(decode, seg_frames[position + 1])
-                    waited = time.time()
-                    want_stats = (done % job.stats_every) == 0
-                    result = plan.apply(tiles, with_stats=want_stats, threads=job.warp_threads)
-                    warped = time.time()
-                    if want_stats:
-                        report = verify.agreement(result.stats)
+                    image, report, warp_seconds, gate_seconds = _stitch_one(
+                        plan,
+                        tiles,
+                        threads=job.warp_threads,
+                        gate=(done % job.stats_every) == 0,
+                    )
+                    if report is not None:
                         reports.append(report)
                         if not report.passed:
                             raise GeometryGateFailed(
                                 f"frame {frame} failed the overlap-agreement gate:\n"
                                 f"{report.report()}"
                             )
-                    gated = time.time()
-                    writer.write(result.image)
+                    write_started = time.time()
+                    writer.write(image)
                     written = time.time()
-                    stages.decode_wait += waited - tick
-                    stages.warp += warped - waited
-                    stages.gate += gated - warped
-                    stages.write += written - gated
+                    stages.decode_wait += waited
+                    stages.warp += warp_seconds
+                    stages.gate += gate_seconds
+                    stages.write += written - write_started
                     stages.frames += 1
                     done += 1
                     encoded += 1
-                    recent.append(written - tick)
+                    recent.append(waited + warp_seconds + gate_seconds + written - write_started)
                     if progress:
                         rate = float(np.mean(recent))
                         progress(
@@ -471,3 +510,237 @@ def frames_in_segments(job: SequenceJob) -> Iterable[int]:
     """Convenience for callers that want the per-segment frame lists flattened."""
     for _, frames in job.segments():
         yield from frames
+
+
+# --- master sink ----------------------------------------------------------------------
+#
+# A lossless PNG sequence at the source's native density: the input to P4's quality work
+# and to archiving, not a delivery format. It shares this module's decode prefetch, warp
+# and geometry gate with the MP4 path, and differs in three ways that matter:
+#
+# * **No segments.** One file per frame is already the unit of progress, so resuming is
+#   "does this frame's file exist" -- checked before the decode is even queued, so a
+#   resumed run does no work it will throw away.
+# * **The write is not free.** A 7680x3840 PNG costs 0.68 s at compress_level 1 and
+#   2.77 s at 6 (AGENTS.md section 8), against a 1.9 s warp. Level 1 by default, and the
+#   writes go to a small thread pool -- Pillow releases the GIL inside the encoder -- so
+#   they overlap the next frame's warp instead of adding to it.
+# * **Disk is the constraint, not bitrate.** 39.6 MiB a frame measured, so the 778-frame
+#   job is 30 GiB -- fifteen times the MP4. The precheck refuses up front rather than
+#   dying half way through.
+
+MASTER_BYTES_PER_PIXEL = 1.6
+"""Conservative estimate, for the disk precheck only.
+
+Real 8K masters of this content measure **39.6 MiB a frame** at compress_level 1, i.e.
+1.41 bytes/pixel -- lossless PNG on high-frequency lava geometry gets less than a 2:1
+saving over raw RGB. 1.6 leaves room for busier frames without ever under-reserving."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MasterJob:
+    """Render `frames` as a lossless PNG sequence into `directory`."""
+
+    source: SourceSet
+    rig: Rig
+    frames: tuple[int, ...]
+    directory: pathlib.Path
+    width: int
+    """Master width, 2:1. Always the source's native density (`Rig.native_width`) -- a
+    master is not a delivery, so there is no ladder to choose from."""
+    compress_level: int = 1
+    """Pillow's zlib level. 1 costs 0.68 s a frame against 6's 2.77 s for about 10% more
+    bytes (AGENTS.md section 8); a master is an intermediate, so time is worth more than
+    the bytes. The *pixels* are identical either way -- only the file differs."""
+    decode_workers: int = 4
+    warp_threads: int = DEFAULT_THREADS
+    write_workers: int = 1
+    """PNG encodes in flight.
+
+    One is fastest, measured: at 8K, 1 writer gives 2.40 s/frame (warp 2.06, blocked on
+    the write 0.12) against 2 writers' 2.52 (warp 2.28, blocked 0.02). The second worker
+    hides the write almost completely and pays for it by slowing the warp -- the same
+    trade AGENTS.md section 8 records for the decode pool, where the *total* thread count
+    mattered more than the split. Raise it only if the disk, not the CPU, is the limit.
+
+    Also bounds memory: each queued image is 88 MB at 8K."""
+    stats_every: int = 100
+    resume: bool = True
+    memory_soft_limit: int = memory.SOFT_LIMIT_BYTES
+
+    def __post_init__(self) -> None:
+        if not self.frames:
+            raise ValueError("no frames to process")
+        if self.width < 2 or self.width % 2:
+            raise ValueError(f"master width must be even and positive, got {self.width}")
+        if not 0 <= self.compress_level <= 9:
+            raise ValueError(f"compress_level must be 0..9, got {self.compress_level}")
+        if self.write_workers < 1:
+            raise ValueError("write_workers must be >= 1")
+
+    @property
+    def height(self) -> int:
+        return self.width // 2
+
+    def frame_path(self, frame: int) -> pathlib.Path:
+        """Mirrors the source's own numbering, so masters sort beside their inputs."""
+        return self.directory / f"{self.source.stem}.{frame:0{self.source.frame_digits}d}.png"
+
+    def pending_frames(self) -> tuple[int, ...]:
+        """Frames still to render. Consulted *before* decoding, not after."""
+        if not self.resume:
+            return self.frames
+        return tuple(f for f in self.frames if not self.frame_path(f).is_file())
+
+    def estimated_bytes(self, frames: int | None = None) -> int:
+        count = len(self.frames) if frames is None else frames
+        return int(count * self.width * self.height * MASTER_BYTES_PER_PIXEL)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MasterSummary:
+    directory: pathlib.Path
+    frames: int
+    written: int
+    skipped: int
+    seconds: float
+    plan_seconds: float
+    bytes_written: int
+    gate_reports: tuple[verify.Agreement, ...]
+    stages: StageTimes
+    peak: memory.PeakMemory = dataclasses.field(default_factory=memory.PeakMemory)
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def seconds_per_frame(self) -> float:
+        return self.seconds / self.written if self.written else 0.0
+
+    @property
+    def bytes_per_frame(self) -> float:
+        return self.bytes_written / self.written if self.written else 0.0
+
+
+def run_master(
+    job: MasterJob,
+    *,
+    progress: Callable[[Progress], None] | None = None,
+    log: Callable[[str], None] | None = None,
+    plan: WarpPlan | None = None,
+    cancel: threading.Event | None = None,
+) -> MasterSummary:
+    """Render the job's frames as PNG masters. Cancellable and resumable per frame."""
+    say = log or (lambda _: None)
+    tile_size = job.source.tile_size
+    if tile_size is None:
+        raise ValueError("source tiles are not square or not uniform; cannot stitch")
+
+    todo = job.pending_frames()
+    job.directory.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(job.directory).free
+    need = job.estimated_bytes(len(todo))
+    if free < need:
+        raise RuntimeError(
+            f"{job.directory} has {free / 2**30:.1f} GiB free; {len(todo)} master(s) need "
+            f"about {need / 2**30:.1f} GiB. Refusing to start."
+        )
+
+    if plan is None:
+        say("building warp plan ...")
+        plan = WarpPlan.build(job.rig, job.width, job.height, tile_size)
+        say(f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB)")
+    elif (plan.width, plan.height, plan.tile_size) != (job.width, job.height, tile_size):
+        raise ValueError("the supplied warp plan does not match this job")
+
+    indices = list(job.rig.unique_indices)
+    total = len(job.frames)
+    skipped = total - len(todo)
+    started = time.time()
+    done = skipped
+    written = 0
+    bytes_written = 0
+    recent: collections.deque[float] = collections.deque(maxlen=20)
+    reports: list[verify.Agreement] = []
+    stages = StageTimes()
+
+    def decode(frame: int) -> dict[int, U8]:
+        return io.load_tiles(job.source, frame, indices, workers=job.decode_workers)
+
+    def write_one(frame: int, image: U8) -> int:
+        return io.write_png_atomically(
+            job.frame_path(frame), image, compress_level=job.compress_level
+        )
+
+    stop = cancel if cancel is not None else threading.Event()
+    flight: collections.deque[concurrent.futures.Future[int]] = collections.deque()
+    with (
+        _CancelScope(stop),
+        concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch,
+        concurrent.futures.ThreadPoolExecutor(max_workers=job.write_workers) as writers,
+    ):
+        try:
+            for frame, tiles, waited in _prefetch_tiles(prefetch, decode, todo):
+                if stop.is_set():
+                    raise Cancelled(f"cancelled after {written} of {len(todo)} frame(s)")
+                image, report, warp_seconds, gate_seconds = _stitch_one(
+                    plan, tiles, threads=job.warp_threads, gate=(done % job.stats_every) == 0
+                )
+                if report is not None:
+                    reports.append(report)
+                    if not report.passed:
+                        raise GeometryGateFailed(
+                            f"frame {frame} failed the overlap-agreement gate:\n{report.report()}"
+                        )
+                write_started = time.time()
+                flight.append(writers.submit(write_one, frame, image))
+                # Keep at most `write_workers` encodes outstanding, so the queue cannot
+                # grow into a pile of 88 MB frames while the disk falls behind.
+                while len(flight) > job.write_workers:
+                    bytes_written += flight.popleft().result()
+                blocked = time.time() - write_started
+                stages.decode_wait += waited
+                stages.warp += warp_seconds
+                stages.gate += gate_seconds
+                stages.write += blocked
+                stages.frames += 1
+                done += 1
+                written += 1
+                recent.append(waited + warp_seconds + gate_seconds + blocked)
+                if progress:
+                    rate = float(np.mean(recent))
+                    progress(
+                        Progress(done, total, frame, 0, 1, rate, rate * (total - done))
+                    )  # fmt: skip
+            while flight:
+                bytes_written += flight.popleft().result()
+        except BaseException:
+            # Outstanding writes are frames that are already stitched, so let them land
+            # rather than cancelling them: a resume then has no warp to redo. Each write
+            # is atomic, so one failing still leaves no partial file behind, and the
+            # original exception is the one that propagates.
+            for future in flight:
+                with contextlib.suppress(BaseException):
+                    future.result()
+            raise
+
+    peak = memory.PeakMemory(
+        stitcher=memory.peak_commit(), stitcher_resident=memory.peak_working_set()
+    )
+    warnings: list[str] = []
+    if peak.measured:
+        say(peak.report())
+        if peak.exceeds(job.memory_soft_limit):
+            warnings.append(peak.warning(job.memory_soft_limit))
+            say(f"WARNING: {warnings[-1]}")
+    return MasterSummary(
+        directory=job.directory,
+        frames=total,
+        written=written,
+        skipped=skipped,
+        seconds=time.time() - started,
+        plan_seconds=plan.build_seconds,
+        bytes_written=bytes_written,
+        gate_reports=tuple(reports),
+        stages=stages,
+        peak=peak,
+        warnings=tuple(warnings),
+    )

@@ -10,8 +10,8 @@
 | ✅ | **P0** 现状固化 | rig 反解完成，验证工具入库 `tools/` |
 | ✅ | **P1** 单帧正确 + 来源目录抽象 | `vr-compose frame` 可用，指标 A PASS |
 | ✅ | **P2** 序列吞吐 + 直出 MP4 | `vr-compose sequence`：778 帧 8K 实跑 **2.10 s/帧**（22.3×，~26 min），196.9 Mbps，可续跑，产物合规，186 个测试全绿 |
-| ▶ | **P3** 收尾与母版 sink | **进行中**：✅ 编码器内存与 64 GB 软上限（23.8 GiB，与帧数无关）、✅ 取消语义（进程组 + `Cancelled`）、✅ 4K 母版路径；**剩** h265/60fps smoke、PNG/EXR 母版 sink |
-| | **P4** 画质（母版） | 各向异性滤波、极区多 tile 联合重建、线性光混合 |
+| ✅ | **P3** 收尾与母版 sink | 四项全部完成：内存报告 + 64 GB 软上限（23.8 GiB，与帧数无关）、取消语义（进程组 + `Cancelled`）、4k/h265/60fps 真实数据 smoke 全部合规、PNG 母版 sink（2.40 s/帧）。228 个测试全绿。**只剩你手动按一次 Ctrl-C 验收** |
+| ▶ | **P4** 画质（母版） | **下一步**。各向异性滤波、极区多 tile 联合重建、线性光混合（PNG 母版 sink 已经就位，可以做 A/B） |
 | ◇ | **可选** GPU 加速 | 未决定。warp 1.84 s → 估计 30–40 ms，778 帧从 ~26 min 到 ~3 min；代价 ~1 GB 依赖、仅 NVIDIA |
 | | P5–P7 / 运维 | 交付合规 / GUI / 打包 / 运维 |
 
@@ -69,7 +69,7 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 | P0 | rig 反解 + 验证工具 | ✅ 已完成（结论写入 AGENTS.md，脚本在 `tools/`） | — |
 | P1 | 单帧正确 + 来源目录抽象 | ✅ **已完成** —— median 0.68，113 个测试全过，无硬编码路径 | — |
 | P2 | 序列吞吐 + 直出 MP4 | ✅ **已完成** —— 8K 2.17 s/帧（21.5×），120 帧实测合规，续跑经测试 | — |
-| P3 | 收尾与母版 sink | ✅ 编码器内存 + 64 GB 软上限；✅ 取消语义；4k ✅ / h265 / 60fps 真实数据 smoke；PNG 母版 sink | 2–2.5 天 |
+| P3 | 收尾与母版 sink | ✅ **已完成** —— 内存 + 软上限、取消语义、三组 smoke 全合规、PNG 母版 sink | — |
 | **可选** | GPU 加速（CuPy） | warp 1.84 s → 估计 30–40 ms；CPU 路径保留为逐字节基准；不在关键路径上 | 2–3 天，**未决定** |
 | P4 | 画质（母版） | 极区可量化改善；无可见接缝；线性光混合 | 3–5 天 |
 | P5 | 交付合规 | 24 种参数组合全部合规；球面元数据；色彩管线实验有结论 | 3–4 天 |
@@ -353,12 +353,27 @@ python -m vr_compose --source E:/22 sequence --frames 1656-1835 --segment-gops 1
 segments are kept.`、退出码 130、`.segments` 目录里只有完成的整段且没有 `.part`；
 重跑同一条命令只补缺段。
 
-### 2. 真实数据 smoke（4k / h265 / 60fps）
+### 2. 真实数据 smoke（4k / h265 / 60fps）✅
 
-**帧数要改**：`StreamInfo.i_intervals` 是由相邻 I 帧位置的差集算出来的，30 帧 @30fps 只有 1 个 I 帧
-→ `i_intervals == ()` → `conformance_problems` 里 `any(())` 是 `False`，**GOP 检查空过**。
-60 fps（GOP 120）更严重。改成 **130 帧 @30fps + `--segment-gops 1`**（3 个分段、2 个 I 间隔，
-GOP 与 concat 都真的被验到），60 fps 那组用 **250 帧**。8K 下每组约 4.5 min。
+**帧数问题（已修）**：`StreamInfo.i_intervals` 是相邻 I 帧位置的差集，30 帧 @30fps 只有 1 个 I 帧
+→ 空集合 → `conformance_problems` 里 `any(())` 是 `False`，**GOP 检查空过**。
+这条在 P3 的一次 60 帧实跑上原样复现了（`I-gap=[]` 却 `conformance: OK`）。
+改成 **130 帧 @30fps / 250 帧 @60fps，配 `--segment-gops 1`**，三段、两个 I 间隔，GOP 与 concat 都真的被验到。
+
+三组全部通过（真实数据 E:/22）：
+
+| 配置 | 帧数 | 产物 | s/帧 | 内存峰值 |
+|---|---|---|---|---|
+| **4K** h264 高档 | 130 | `h264 High L5.1 avc1 4096x2048 yuv420p B=0 I-gap=[60]` | 2.16 | — |
+| **h265** 8K 高档 | 130 | `hevc Main L6.2 hvc1 7680x3840 yuv420p B=0 I-gap=[60]` | 2.33 | 9.8 GiB（编码 6.1） |
+| **60 fps** 8K h264 | 250 | `h264 High L6.1 avc1 7680x3840 yuv420p B=0 I-gap=[120]` | 2.11 | 26.6 GiB（编码 22.8） |
+
+全部 `conformance: OK`，几何门 PASS（最差 median 0.75）。等级与 AGENTS.md 第 5 节逐项一致
+（4K 30fps → 5.1、8K h265 → 6.2 Main、8K 60fps → 6.1）。
+**x265 比 x264 省内存**（编码侧 6.1 对 20.1 GiB），60 fps 因为 GOP 翻倍反而更吃内存（22.8 GiB）。
+
+短片段码率照例超档位（4K 69.7 / h265 216.2 / 60fps 245.8 Mbps），是 2 秒 VBV 在短片段上的超调，
+不是合规问题 —— 全长 778 帧那次是 196.9 ≤ 200。等级本身也都容得下这些瞬时码率。
 
 **4K 走哪条路 —— 已定案并实现：按母版拼接，编码时 Lanczos 重采样**
 
@@ -404,53 +419,48 @@ ROADMAP 原文写「4K 走另一张 LUT（4096×2048）」，AGENTS.md 第 5 节
 
 h265 那组走默认模式：`--deterministic` 慢 7.7×，不适合当 smoke。
 
-### 3. PNG / EXR 母版 sink
 
-**不要把 `run_sequence` 撑大。** 把已验证的 decode → warp → 几何门 抽成迭代器，两个 sink 各自消费它，
-MP4 路径的字节就**可证明**没被碰过（指标 D 继续成立，现有测试一行不用改）：
+### 3. PNG / EXR 母版 sink ✅
 
-```python
-def iter_stitched(..., skip: Callable[[int], bool]) -> Iterator[Stitched]
-```
+`vr-compose sequence --out-format png`：一帧一个无损 PNG，按源的原生密度，`--out` 是目录。
 
-- `skip` 在**提交预取之前**问，续跑时不会去解码 + warp 一个马上要跳过的帧。
-  MP4 路径的分段级跳过留在迭代器外面，那条路径完全不变。
-- `PngSink` 写 `<dir>/<stem>.<frame:04d>.png`，按文件存在续跑，**写 `.part` 再原子改名**
-  （和分段同一套纪律，否则中断的半个 PNG 会被当成写完的）。
-- `SequenceJob.__post_init__` 现在**强制** `.mp4` 后缀，PNG sink 的输出是目录 → 后缀检查搬进 MP4 sink。
-- `estimated_output_bytes()` 是按码率估的，PNG 要另一套：8K 约 28 MiB/帧（第 4 节），
-  778 帧 ≈ 21 GiB。这条路径上「提前拒绝」比 MP4 更重要。
-- 吞吐：PNG 编码 compress_level 6 是 2.77 s/帧、level 1 是 0.68 s（第 8 节），level 6 会**盖过**
-  1.9 s 的 warp 成为新瓶颈。写入放小线程池（Pillow 编码时释放 GIL —— **要测，不要假定**），
-  母版默认 level 1：它是给 P4 比画质用的中间产物，不是交付物。
-- 判据要说准：像素恒等由指标 D 保证；**字节**恒等还要求同一个 compress_level。
-- EXR 只留接口：`--out-format {mp4,png}`，给 `exr` 一条说明为什么不行的错误（源是 8-bit，
-  取决于第 11 节第 5 项的上游改造）。**现在不引 OpenEXR 依赖。**
-- `--out-format png` 时 `--codec/--bitrate/--fps/--segment-gops/--deterministic` 全部失去意义
-  → 显式报错而不是静默忽略（第 10 节约定：报错不猜）。
+- **两个 sink 共用一套核心**：`_prefetch_tiles`（解码预取）与 `_stitch_one`（warp + 几何门）
+  被两条路径共同调用，所以几何、预取、抽检是同一份代码。
+  MP4 路径的循环只是改成消费这两个 helper，**逐字节行为不变**（续跑逐字节一致的那批测试原样通过）。
+- **按文件存在续跑，而且在解码之前就判断** —— `pending_frames()` 先过滤帧列表，
+  所以续跑不会去解码 + warp 一个马上要丢掉的帧。
+- **写 `.part` 再原子改名**，半个 PNG 不可能被当成写完的（有测试往目录里放一个假 `.part` 验证）。
+- **取消时不丢已经拼好的帧**：还在飞的写任务是「已经 warp 完」的帧，让它们落地而不是取消，
+  续跑就不用重算 warp。
+- 磁盘预检独立于码率：按 **1.6 字节/像素**估（实测 1.41，留余量），778 帧 8K ≈ 30 GiB。
+- `--out-format png` 时 `--codec/--bitrate/--fps/--size/--segment-gops/--deterministic/--encoder-threads/--keep-segments/--stitch-at`
+  一律**报错**而不是忽略；反过来 `--compress-level/--write-workers` 在 mp4 下也报错。
+- **EXR 只留接口**：`--out-format exr` 给一条说明为什么空着的错误（源是 8-bit PNG，
+  EXR 装不进更多信息；等第 11 节第 5 项的上游改造）。没引 OpenEXR 依赖。
 
+**实测（8K，10 帧真实数据）**：**2.40 s/帧**、**39.6 MiB/帧**、内存 3.7 GiB（没有编码器那份）。
+`--write-workers 1` 比 2 快（2.40 对 2.52 s/帧）—— 第二个写线程把「阻塞在写」从 0.12 s 压到 0.02 s，
+代价是把 warp 从 2.06 拖到 2.28，**总线程数比单项各多少更重要**，和第 8 节解码池那条同一个道理。
+
+**顺手抓到一个真 bug**：Pillow 按文件扩展名猜格式，所以写 `<name>.png.part` 会抛
+`unknown file extension: .part`。`write_png` 现在显式传 `format="PNG"` —— 它是 PNG writer，
+本来就不该依赖文件叫什么。
 ### 顺序与工期
 
-| 顺序 | 项 | 工期 | 为什么在这个位置 |
-|---|---|---|---|
-| 1 | 编码器内存 + 软上限告警 | ½ 天 | smoke 必须用最终编码参数，否则合规结论要重跑 |
-| 2 | 取消语义 | ½ 天 | 代码 + 测试；手动 Ctrl-C 验收搭在第 3 项的长跑上，不额外占机器 |
-| 3 | smoke（含 4K 路径落地） | ½ 天，多半是机器时间 | |
-| 4 | PNG sink | 1 天 | 唯一的新增功能面，放最后 |
+按计划的顺序做完了：编码器内存 → 取消语义 → smoke（含 4K 路径落地）→ PNG sink。
+把内存排在最前面是对的 —— smoke 的合规结论必须用最终编码参数得出，否则要重跑。
 
-合计 **2–2.5 天**。
+**完成判据（逐条兑现情况）**
 
-**完成判据**
-
-- `tools/encode_probe.py memory` 复现上表；整机峰值有实测数字，且**与总帧数无关**；
-  超 64 GB 只 Warning（有测试覆盖告警分支），x264 与 x265 都量过。
-- kill 掉分段 ffmpeg → 走取消路径、退出码 130、**分段目录和输出旁边**都无 `.part`、
-  完成分段保留、续跑跑完；外加真实 8K 任务上手动 Ctrl-C 一次。
-- 三组 smoke 全部 `conformance: OK`，且帧数足够让 GOP 检查非空过（≥ 3 个 I 帧）。
-- 4K 路径按实测结论定案；若走 8K + Lanczos，母版尺寸与交付尺寸在代码里分开。
-- PNG 母版 sink 可用：像素与 `frame` 命令恒等、同 compress_level 下字节恒等、按文件续跑、
-  空间不足拒绝启动、8K ≤ 2.5 s/帧（即没成为新瓶颈）。
-- `ruff check` + `ruff format --check` + `mypy --strict` + `pytest` 全绿。
+| | 判据 | 结果 |
+|---|---|---|
+| ✅ | `tools/encode_probe.py memory` 可复现；整机峰值有实测数字且与总帧数无关；超 64 GB 只 Warning；x264/x265 都量过 | 23.8 GiB，60 帧与 180 帧完全相同；告警分支有测试（软上限设成 1 字节仍产出合规文件） |
+| ✅ | 编码器死亡 → 走失败路径而非取消；无 `.part`；完成分段保留；续跑跑完 | 有测试；并因此抓到 `OSError` 分类那个 bug |
+| ✅ | 三组 smoke 全部 `conformance: OK`，帧数足够让 GOP 检查非空过 | 4k / h265 / 60fps 三组齐过，I-gap 分别 60 / 60 / 120 |
+| ✅ | 4K 路径按实测定案，母版尺寸与交付尺寸在代码里分开 | `EncodeSpec.master` + `Rig.native_width`，顺带覆盖 16K→8K |
+| ✅ | PNG 母版 sink：像素与 `frame` 恒等、同 compress_level 下字节恒等、按文件续跑、空间不足拒绝启动 | 全部有测试；8K 实测 2.40 s/帧 |
+| ✅ | `ruff check` + `ruff format --check` + `mypy --strict` + `pytest` 全绿 | 228 个测试 |
+| ▶ | **真实 8K 任务上手动 Ctrl-C 一次** | **留给用户验收** —— 键盘事件没法在非交互会话里合成，命令见第 1 项末 |
 ---
 
 ## P4 — 画质（母版层）
@@ -624,8 +634,8 @@ def iter_stitched(..., skip: Callable[[int], bool]) -> Iterator[Stitched]
 
 ## 下一步
 
-**P2 已完成并提交**（`c2c508d`，8K 2.10 s/帧，22.3×），进行中的是 **P3 收尾与母版 sink**
-（编码器内存与 64 GB 软上限、取消语义、真实数据 smoke、PNG/EXR sink），然后 **P4 画质**：各向异性重采样替换最近邻、
+**P2、P3 已完成**（8K 2.10 s/帧，22.3×；P3 四项全部兑现，只剩手动 Ctrl-C 验收），
+下一步是 **P4 画质**：各向异性重采样替换最近邻、
 极区多 tile 联合重建、线性光混合、时域稳定性检查。P4 只动母版层，不碰编码；
 每一步都要先过指标 A（几何）和指标 D（`WarpPlan` 与 `stitch_bands` 逐字节一致，
 或者在有意换采样器时**同时**更新两者并重记基线）。

@@ -51,6 +51,22 @@ def load_tiles(
         return dict(loaded)
 
 
+def write_png_atomically(path: pathlib.Path, image: U8, *, compress_level: int = 6) -> int:
+    """Write through `<path>.part` and rename. Returns the size in bytes.
+
+    The master sink resumes by asking whether a frame's file exists, so a half-written
+    PNG must never be able to answer yes -- the same discipline the MP4 segments use.
+    """
+    partial = path.with_name(path.name + ".part")
+    try:
+        size = write_png(partial, image, compress_level=compress_level)
+        partial.replace(path)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return size
+
+
 def write_png(path: pathlib.Path, image: U8, *, compress_level: int = 6) -> int:
     """Write an RGB panorama and return its size in bytes.
 
@@ -61,5 +77,8 @@ def write_png(path: pathlib.Path, image: U8, *, compress_level: int = 6) -> int:
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"expected an RGB image, got shape {image.shape}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(image, mode="RGB").save(path, compress_level=compress_level)
+    # `format` explicitly, not inferred from the suffix: this writes PNG whatever the file
+    # is called, and the atomic path above hands it a `.png.part`, which Pillow would
+    # otherwise reject as an unknown extension.
+    Image.fromarray(image, mode="RGB").save(path, format="PNG", compress_level=compress_level)
     return path.stat().st_size

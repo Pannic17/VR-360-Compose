@@ -5,8 +5,8 @@
 
 仓库：<https://github.com/Pannic17/VR-360-Compose>
 
-**进度**：P0（rig 反解）、P1（单帧正确 + 来源目录抽象）、P2（序列吞吐 + 直出 MP4）已完成，
-8K 实测 **2.0 s/帧**（上一代 46.85 s）。P3 进行中：收尾与母版 sink（4K/16K 的母版路径已落地）。
+**进度**：P0（rig 反解）、P1（单帧正确）、P2（序列吞吐 + 直出 MP4）、P3（收尾与母版 sink）已完成，
+8K 实测 **2.0 s/帧**（上一代 46.85 s）。下一步 P4：画质（各向异性滤波、极区重建、线性光混合）。
 阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)。
 
 ---
@@ -99,6 +99,7 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--fps` | `30` | `30` / `60`，GOP 随之为 60 / 120 帧（2 秒） |
 | `--out` | 程序目录下自动命名 | 输出 .mp4 路径 |
 | `--stem` | | 目录里有多个文件 stem 时选择要处理的集合 |
+| `--out-format` | `mp4` | `mp4` 交付；`png` 出无损母版序列（按源的原生密度，一帧一个文件）；`exr` 预留未实现 |
 | `--stitch-at` | `native` | `native` 按源的原生密度拼母版（本 rig = 4× tile），再由编码器 Lanczos 降到交付尺寸；`delivery` 直接拼到交付尺寸 —— 快，但会走样，**只用于预览**（见下） |
 | `--deterministic` | 关 | 续跑结果逐字节一致；编码器慢 6–8 倍，一般不用（见下） |
 | `--segment-gops` | `5` | 每个可续跑分段含几个 GOP（5 × 2 s = 10 s） |
@@ -109,6 +110,12 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--no-resume` | | 忽略已完成的分段，全部重编 |
 | `--keep-segments` | | 合并后保留分段文件 |
 | `--no-bar` | | 不显示进度条，只输出普通日志行 |
+
+**母版序列**：`--out-format png` 时 `--out` 是**目录**，一帧一个无损 PNG，按源的原生密度
+（本 rig = 4× tile），文件名沿用源的编号（`L_Cathedral.1656.png`）。
+实测 8K **2.40 s/帧、39.6 MiB/帧**，778 帧约 30 GiB —— 是同长度 MP4 的 15 倍，所以它是按需产出的
+（P4 比画质、归档），不是交付路径。按文件存在续跑，`--compress-level` 只影响文件大小不影响像素。
+这时候 `--codec / --bitrate / --fps / --size` 之类会**明确报错**而不是被忽略。
 
 **输出规格**（用户确认的交付规格，全部由 `ffprobe` 逐项校验）：MP4 容器、`avc1` / `hvc1`、
 High / Main profile、`yuv420p` 8-bit 4:2:0、**只有 I 帧和 P 帧（B=0）**、闭合 GOP 2 秒、无音轨。
@@ -194,7 +201,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 214 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 228 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools

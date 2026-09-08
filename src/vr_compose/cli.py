@@ -164,6 +164,136 @@ def cmd_frame(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+DELIVERY_ONLY = (
+    "size",
+    "codec",
+    "bitrate",
+    "fps",
+    "segment_gops",
+    "deterministic",
+    "encoder_threads",
+    "keep_segments",
+    "stitch_at",
+)
+"""`sequence` options that only mean something when an encoder is involved."""
+
+MASTER_ONLY = ("compress_level", "write_workers")
+"""...and the ones that only mean something when PNG files are."""
+
+
+def _reject_inapplicable(args: argparse.Namespace, names: tuple[str, ...], why: str) -> None:
+    """Refuse options that cannot apply, rather than ignoring them (AGENTS.md §10).
+
+    Compares against the parser's own defaults, so passing a default value explicitly is
+    not treated as asking for anything.
+    """
+    given = [name for name in names if getattr(args, name) != args.option_defaults[name]]
+    if given:
+        flags = ", ".join("--" + name.replace("_", "-") for name in given)
+        raise SystemExit(f"{flags} {why}")
+
+
+def cmd_master(
+    args: argparse.Namespace, chosen: source_mod.SourceSet, rig: Rig, frames: list[int]
+) -> int:
+    """`sequence --out-format png`: a lossless PNG master per frame.
+
+    Masters are always at the source's native density -- the sampling density the tiles
+    were rendered at, `Rig.native_width` -- because a master is the thing other sizes are
+    derived *from*. For a one-off at some other width, `frame --width` is the command.
+    """
+    _reject_inapplicable(
+        args,
+        DELIVERY_ONLY,
+        "only apply to --out-format mp4. A PNG master has no codec, bitrate, frame rate "
+        "or delivery size to choose: it is the source's own density, losslessly.",
+    )
+    tile = chosen.tile_size
+    if tile is None:
+        raise SystemExit("source tiles are not square or not uniform; cannot stitch")
+    width = rig.native_width(tile)
+    default_name = f"{chosen.stem}.{frames[0]}-{frames[-1]}.{width}x{width // 2}.masters"
+    try:
+        job = pipeline.MasterJob(
+            source=chosen,
+            rig=rig,
+            frames=tuple(frames),
+            directory=args.out or pipeline.default_output_dir() / default_name,
+            width=width,
+            compress_level=args.compress_level,
+            decode_workers=args.decode_workers,
+            warp_threads=args.warp_threads,
+            write_workers=args.write_workers,
+            stats_every=args.stats_every,
+            resume=not args.no_resume,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+    pending = job.pending_frames()
+    print(f"source     : {chosen.root}  stem {chosen.stem!r}")
+    print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
+    print(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
+    print(f"master     : {width}x{width // 2} PNG, compress_level {job.compress_level}")
+    print(f"output     : {job.directory}")
+
+    bar = tqdm(
+        total=len(frames),
+        unit="frame",
+        desc="mastering",
+        dynamic_ncols=True,
+        disable=args.no_bar,
+        mininterval=1.0,
+    )
+    bar.update(len(frames) - len(pending))
+
+    def on_progress(report: pipeline.Progress) -> None:
+        bar.n = report.done
+        bar.set_postfix_str(f"{report.seconds_per_frame:.2f} s/frame", refresh=False)
+        bar.refresh()
+
+    def on_log(message: str) -> None:
+        tqdm.write(f"           {message}")
+
+    try:
+        summary = pipeline.run_master(job, progress=on_progress, log=on_log)
+    except pipeline.GeometryGateFailed as exc:
+        raise SystemExit(
+            f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
+        ) from None
+    except (pipeline.Cancelled, KeyboardInterrupt) as exc:
+        detail = f" ({exc})" if isinstance(exc, pipeline.Cancelled) else ""
+        print(
+            f"\ninterrupted{detail}; finished masters are kept. Re-run the same command to resume.",
+            file=sys.stderr,
+        )
+        return 130
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from None
+    finally:
+        bar.close()
+
+    print(f"\ndone       : {summary.written} master(s) -> {summary.directory}")
+    if summary.written:
+        print(
+            f"throughput : {summary.seconds_per_frame:.2f} s/frame, "
+            f"{summary.bytes_per_frame / 2**20:.1f} MiB/frame "
+            f"({summary.bytes_written / 2**30:.2f} GiB written)"
+        )
+        print(f"stages     : {summary.stages.report()}")
+    if summary.skipped:
+        print(f"resumed    : {summary.skipped} master(s) were already present")
+    if summary.gate_reports:
+        worst = max(report.median for report in summary.gate_reports)
+        gates = len(summary.gate_reports)
+        print(f"geometry   : {gates} sampled frame(s) PASS, worst median {worst:.2f}")
+    if summary.peak.measured:
+        print(f"memory     : {summary.peak.report()}")
+    for warning in summary.warnings:
+        print(f"WARNING    : {warning}", file=sys.stderr)
+    return 0
+
+
 def cmd_sequence(args: argparse.Namespace) -> int:
     candidates = [s for s in source_mod.scan(args.source) if s.usable] if args.source else []
     chosen = _select_stem(candidates, args.stem) if candidates else _resolve_source(args.source)
@@ -173,6 +303,21 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from None
     try:
         frames = pipeline.parse_frames(args.frames, chosen.frames)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    if args.out_format == "exr":
+        raise SystemExit(
+            "EXR masters are not implemented: the source is 8-bit PNG, so an EXR would "
+            "carry no more information than the PNG master does. The interface is "
+            "reserved for a 16-bit source (AGENTS.md §11, item 5). Use --out-format png."
+        )
+    if args.out_format == "png":
+        return cmd_master(args, chosen, rig, frames)
+    _reject_inapplicable(
+        args, MASTER_ONLY, "only apply to --out-format png; an MP4 is not a PNG sequence."
+    )
+
+    try:
         spec = encode.EncodeSpec.for_size(
             args.size,
             args.codec,
@@ -333,6 +478,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="output .mp4; default: <stem>.<first>-<last>.<WxH>.<codec>.mp4 beside the program",
     )
+    sequence.add_argument(
+        "--out-format",
+        choices=("mp4", "png", "exr"),
+        default="mp4",
+        help="'mp4' (default) is the delivery path; 'png' writes a lossless master per "
+        "frame at the source's native density, for quality work and archiving",
+    )
     sequence.add_argument("--size", choices=list(encode.SIZES), default="8k")
     sequence.add_argument("--codec", choices=["h264", "h265"], default="h264")
     sequence.add_argument(
@@ -376,7 +528,28 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument("--no-bar", action="store_true", help="plain log lines, no tqdm bar")
     sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
     sequence.add_argument("--keep-segments", action="store_true")
-    sequence.set_defaults(func=cmd_sequence)
+    sequence.add_argument(
+        "--compress-level",
+        type=int,
+        default=1,
+        choices=range(10),
+        help="PNG master zlib level; 1 costs 0.68 s a frame against 6's 2.77 s for ~10%% "
+        "more bytes. The pixels are identical either way (--out-format png only)",
+    )
+    sequence.add_argument(
+        "--write-workers",
+        type=int,
+        default=1,
+        help="PNG encodes in flight; 1 measured fastest at 8K -- a second worker hides "
+        "the write but slows the warp (--out-format png only)",
+    )
+    # Attached so `_reject_inapplicable` can tell "asked for" from "left alone".
+    sequence.set_defaults(
+        func=cmd_sequence,
+        option_defaults={
+            name: sequence.get_default(name) for name in (*DELIVERY_ONLY, *MASTER_ONLY)
+        },
+    )
     return parser
 
 
