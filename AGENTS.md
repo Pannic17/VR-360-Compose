@@ -571,6 +571,22 @@ resident 是「当时有多少在物理内存里」，Windows 会在缓存压力
 PySide6 + PyInstaller，Windows exe。以下数字来自 `tools/package_probe.py`
 （真打了三种配置，跑起来验证过）。
 
+### 入口文件与「一个 exe，两副面孔」
+
+打包入口是根目录的 `main_ui.py`（用户 2026-09-08 要求，与 VR-Installer 的布局一致），
+`.spec` 指向它。它不只是个 `import` 转发，有三件事只能在这里做：
+
+- **没有参数 = 开窗口，有参数 = 当 CLI。** 冻结后只有一个可执行文件，
+  而窗口跑作业的方式是**启动自己**（`gui.window.worker_command()` 冻结时返回
+  `[sys.executable]`）。所以这个 exe 必须两样都是。
+  **改掉这条规则等于让打包版的「开始」按钮再开一个窗口。**
+- **`multiprocessing.freeze_support()` 是 `__main__` 下第一条语句**（第 2 节约束 4）。
+  管线现在用线程，所以还没有东西会触发它；这一句照样放在最前面，
+  因为它的失败形态是一个带着应用图标的 fork bomb，等有人加进程池时再补就晚了。
+  有测试直接读源码断言它是第一条。
+- **src 布局**：`vr_compose` 在 `src/` 下，所以它在 `src/` 存在时把它加进 `sys.path`，
+  未安装的检出也能 `python main_ui.py` 跑；冻结后没有 `src/`，那一步自动不生效。
+
 ### 打包方式选型
 
 | 配置 | 分发体积 | 冷启动 | **热启动** | 构建 |

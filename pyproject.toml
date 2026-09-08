@@ -73,7 +73,7 @@ select = [
 
 [tool.mypy]
 python_version = "3.13"
-files = ["src", "tests", "tools"]
+files = ["src", "tests", "tools", "main_ui.py"]
 mypy_path = ["tests"]
 strict = true
 warn_unreachable = true

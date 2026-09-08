@@ -17,6 +17,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from collections.abc import Callable
 
 import pytest
 
@@ -356,3 +357,65 @@ def test_worker_command_runs_this_interpreter() -> None:
     assert command[0] == sys.executable
     assert command[1:] == ["-m", "vr_compose"]
     assert len(command) == 3
+
+
+# --- the packaging entry point ---------------------------------------------------------
+
+
+def test_the_root_entry_point_is_both_faces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frozen build is one exe, and the window renders by launching *itself*.
+
+    So `main_ui.py` has to be the CLI when given arguments and the window when not --
+    otherwise pressing Start in a packaged build opens a second window instead of
+    rendering. See `worker_command`, which returns `[sys.executable]` when frozen.
+    """
+    import main_ui
+
+    assert main_ui.wants_cli([]) is False, "a double-click opens the window"
+    assert main_ui.wants_cli(["--version"]) is True
+    assert main_ui.wants_cli(["--source", "x", "sequence"]) is True
+
+    called: list[tuple[str, list[str]]] = []
+
+    def record(face: str) -> Callable[[list[str]], int]:
+        def run(argv: list[str]) -> int:
+            called.append((face, argv))
+            return 0
+
+        return run
+
+    monkeypatch.setattr("vr_compose.cli.main", record("cli"))
+    monkeypatch.setattr("vr_compose.gui.main", record("gui"))
+
+    assert main_ui.main(["--source", "x", "discover"]) == 0
+    assert called == [("cli", ["--source", "x", "discover"])]
+
+    called.clear()
+    assert main_ui.main([]) == 0
+    assert [face for face, _ in called] == ["gui"], called
+
+
+def test_the_entry_point_calls_freeze_support_first() -> None:
+    """AGENTS.md constraint 4: without it every frozen pool worker starts a fresh GUI,
+    recursively. Asserted on the source text because the failure only shows up in a
+    packaged build, which the test suite cannot produce."""
+    import inspect
+
+    import main_ui
+
+    source = inspect.getsource(main_ui)
+    guard = source.index('if __name__ == "__main__":')
+    body = [
+        line.strip()
+        for line in source[guard:].splitlines()[1:]
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert body[0] == "multiprocessing.freeze_support()", body
+
+
+def test_the_entry_point_makes_the_src_layout_importable() -> None:
+    """`python main_ui.py` in a checkout must work without installing the project."""
+    import main_ui
+
+    assert main_ui.SRC.name == "src"
+    assert (main_ui.SRC / "vr_compose" / "__init__.py").is_file()

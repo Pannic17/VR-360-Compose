@@ -50,6 +50,15 @@ py -3.13 -m venv .venv
 vr-compose-gui
 ```
 
+或者直接跑根目录的入口文件（打包时 `.spec` 也指向它）：
+
+```powershell
+python main_ui.py
+```
+
+`main_ui.py` **不带参数是窗口，带参数就是 CLI** —— 因为打包后只有一个 exe，
+而窗口是靠启动自己来跑作业的。所以 `main_ui.py --source E:/22 discover` 也能用。
+
 选来源目录、选参数、点开始。进度、日志、取消都在窗口里；
 **作业跑在独立子进程**，所以界面不会卡，作业崩了也不会带走窗口。
 取消之后已完成的部分保留，把日志里那条输出路径填回「输出位置」就能续跑。
@@ -256,7 +265,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 265 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 268 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools
@@ -268,6 +277,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 目录结构
 
 ```
+main_ui.py        打包入口：不带参数开窗口，带参数当 CLI（.spec 指向它）
 src/vr_compose/
   projection.py   等距圆柱 <-> 针孔几何，纯数学
   rig.py          装配定义与注册表；未登记布局明确拒绝
