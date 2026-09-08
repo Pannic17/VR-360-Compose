@@ -42,7 +42,29 @@ def folder_size(path: pathlib.Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def ensure_not_running() -> None:
+    """Refuse to build over a copy of the app that is open.
+
+    Windows locks a running executable's files, so PyInstaller's `--clean` fails when it
+    tries to empty the directory -- and it fails deep inside `shutil.rmtree`, on whichever
+    `.pyd` it reached first, which says nothing about the actual cause. Opening the
+    executable for append asks the same question up front and gets the same answer.
+    """
+    if not EXE.exists():
+        return
+    try:
+        with EXE.open("ab"):
+            pass
+    except PermissionError:
+        raise SystemExit(
+            f"{EXE.name} is running, so its files cannot be replaced. Close the "
+            "application (or its console) and run this again. Use --skip-build to "
+            "re-stage ffmpeg and the manual without rebuilding."
+        ) from None
+
+
 def build() -> None:
+    ensure_not_running()
     result = run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(SPEC)])
     if result.returncode != 0:
         raise SystemExit(f"PyInstaller failed with {result.returncode}")
@@ -73,10 +95,23 @@ def stage_ffmpeg(source: pathlib.Path | None) -> None:
 
 
 def stage_manual() -> None:
+    """Both the Markdown and a freshly printed PDF of it.
+
+    The PDF is generated here rather than committed, so it cannot drift from the
+    Markdown: there is no version of this folder whose PDF is a release behind. Both
+    ship because they are for different readers -- the PDF opens on any machine and
+    prints, the Markdown is the one you edit and diff.
+    """
     if not MANUAL.is_file():
         raise SystemExit(f"the manual is missing: {MANUAL}")
     shutil.copy2(MANUAL, DIST / MANUAL.name)
     print(f"    staging {MANUAL.name}", flush=True)
+
+    pdf = DIST / MANUAL.with_suffix(".pdf").name
+    result = run([sys.executable, str(ROOT / "tools" / "manual_pdf.py"), "--out", str(pdf)])
+    if result.returncode != 0 or not pdf.is_file():
+        raise SystemExit(f"the manual PDF was not produced (exit {result.returncode})")
+    print(f"    staging {pdf.name}  {pdf.stat().st_size / 1024:.0f} KiB", flush=True)
 
 
 def smoke(source: pathlib.Path | None) -> None:

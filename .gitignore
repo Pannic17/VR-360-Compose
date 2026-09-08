@@ -34,3 +34,9 @@ desktop.ini
 *.mp4
 *.mp4.part
 *.segments/
+
+# Generated from docs/使用说明.md by tools/manual_pdf.py, and staged into dist/ by the
+# release build. Not committed: a checked-in PDF is one that can be a release behind the
+# Markdown it was made from, and nothing here reads it that the Markdown cannot serve.
+docs/*.pdf
+docs/*.html

@@ -814,7 +814,10 @@ P2/P3 的续跑靠**输出路径相同**来认已完成的分段/帧。名字里
 **一条命令**：`python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --source E:/22`
 （`--source` 可选，给了就多跑一次真数据渲染并与源码运行逐字节对比）。
 产物 `dist/VR-Compose/`，**537.8 MiB**（应用本体 167.5 MiB + ffmpeg/ffprobe 370.3 MiB），
-构建 74 s。中文使用说明 `docs/使用说明.md` 由构建脚本一并拷进去。
+构建 74 s。中文使用说明由构建脚本一并放进去，**Markdown 与 PDF 两份**：
+`使用说明.md` 是可编辑可 diff 的那份，`使用说明.pdf`（A4，4 页）是任何机器都能打开和打印的那份。
+PDF 由 `tools/manual_pdf.py` 在构建时现排（Edge/Chrome 无头打印），**不入库** ——
+入库的 PDF 只会比它生成自的 Markdown 落后一个版本。
 
 **入口文件已经就位**：根目录的 `main_ui.py`（用户要求，与 VR-Installer 的布局一致）。
 `.spec` 指向它。它已经处理了三件冻结后才会暴露的事：

@@ -21,7 +21,8 @@
 | `temporal_probe.py` | §8「时域稳定性」—— 连续 10 帧的方差与与网格无关的跳变界 | 约 4 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池（**探针**，用合成小程序） | 每种配置约 90 s 构建 |
-| `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明 + 冒烟校验 | 约 2 分钟 |
+| `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明（md 与 pdf）+ 冒烟校验 | 约 2 分钟 |
+| `manual_pdf.py` | 把 `docs/使用说明.md` 排版成 PDF（Edge/Chrome 无头打印） | 数秒 |
 
 已经进产品代码、不再需要独立脚本的：
 
@@ -88,6 +89,19 @@
 `build_exe.py` 是照那些结论**真的产出可分发的文件夹** ——
 PyInstaller 走 `VR-Compose.spec`，然后把 ffmpeg/ffprobe 和中文说明放进去，
 最后拿**打包好的 exe**（不是源码）跑一次两帧渲染，并与源码跑出来的**逐字节比对**。
+
+`manual_pdf.py` 由 `build_exe.py` 自动调用，一般不用单独跑 —— 单独跑是为了改完说明先看一眼排版：
+
+```
+.\.venv\Scripts\python.exe tools\manual_pdf.py --keep-html
+```
+
+**PDF 不入库**（`.gitignore` 排掉了）：入库的 PDF 只会比它生成自的 Markdown 落后一个版本。
+它既没有引入 Markdown 库也没有用 reportlab —— 说明文档只用到六种语法，
+自己写个转换器比给一个只依赖 numpy 和 Pillow 的项目加依赖更划算；
+排版交给浏览器无头打印，中文断行、表格列宽、孤行控制全是现成的。
+说明文档里出现它不认识的语法（图片、链接、引用块）时它会**报错并指出行号**，
+而不是悄悄少排一段 —— `tests/test_manual_pdf.py` 守着这条，也守着「每一行都进了 PDF」。
 
 ## 已复现的关键数字
 
