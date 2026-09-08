@@ -6,7 +6,7 @@
 仓库：<https://github.com/Pannic17/VR-360-Compose>
 
 **进度**：P0–P5 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质、
-输出命名与帧模式）。下一步 P6：交付合规与色彩管线调优。
+输出命名与帧模式）。下一步 P6：GUI（PySide6）。
 阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)。
 
 ---
