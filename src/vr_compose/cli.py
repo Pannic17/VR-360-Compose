@@ -209,7 +209,11 @@ def _reject_inapplicable(args: argparse.Namespace, names: tuple[str, ...], why: 
 
 
 def cmd_master(
-    args: argparse.Namespace, chosen: source_mod.SourceSet, rig: Rig, frames: list[int]
+    args: argparse.Namespace,
+    chosen: source_mod.SourceSet,
+    rig: Rig,
+    frames: list[int],
+    stamp: str,
 ) -> int:
     """`sequence --out-format png`: a lossless PNG master per frame.
 
@@ -227,7 +231,7 @@ def cmd_master(
     if tile is None:
         raise SystemExit("source tiles are not square or not uniform; cannot stitch")
     width = rig.native_width(tile)
-    default_name = f"{chosen.stem}.{frames[0]}-{frames[-1]}.{width}x{width // 2}.masters"
+    default_name = pipeline.default_master_dir_name(chosen, stamp)
     try:
         job = pipeline.MasterJob(
             source=chosen,
@@ -253,8 +257,8 @@ def cmd_master(
     print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
     print(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
     print(
-        f"master     : {width}x{width // 2} {job.bit_depth}-bit PNG, "
-        f"compress_level {job.compress_level}, sampler {job.sampler}"
+        f"master     : {width}x{width // 2} {job.bit_depth}-bit PNG at the input's own "
+        f"density, lossless (zlib {job.compress_level}), sampler {job.sampler}"
     )
     print(f"output     : {job.directory}")
 
@@ -326,6 +330,9 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         frames = pipeline.parse_frames(args.frames, chosen.frames)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
+    # One stamp for the whole run: it names the output *and*, for the MP4 path, the
+    # segment directory derived from it, so a second reading could split a job in two.
+    stamp = pipeline.run_stamp()
     if args.out_format == "exr":
         raise SystemExit(
             "EXR masters are not implemented: the source is 8-bit PNG, so an EXR would "
@@ -333,7 +340,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             "reserved for a 16-bit source (AGENTS.md §11, item 5). Use --out-format png."
         )
     if args.out_format == "png":
-        return cmd_master(args, chosen, rig, frames)
+        return cmd_master(args, chosen, rig, frames, stamp)
     _reject_inapplicable(
         args, MASTER_ONLY, "only apply to --out-format png; an MP4 is not a PNG sequence."
     )
@@ -355,7 +362,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             spec=spec,
             frames=tuple(frames),
             output=args.out
-            or pipeline.default_output_dir() / pipeline.default_output_name(chosen, spec, frames),
+            or pipeline.default_output_dir() / pipeline.default_output_name(chosen, stamp),
             segment_gops=args.segment_gops,
             decode_workers=args.decode_workers,
             warp_threads=args.warp_threads,
@@ -512,7 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         type=pathlib.Path,
         default=None,
-        help="output .mp4; default: <stem>.<first>-<last>.<WxH>.<codec>.mp4 beside the program",
+        help="output .mp4, or the directory for --out-format png. Default: "
+        "<stem>_<date>_<time> beside the program -- a new name every run, so an "
+        "auto-named run does not resume; pass this explicitly to continue a previous one",
     )
     sequence.add_argument(
         "--out-format",

@@ -30,6 +30,7 @@ import collections
 import concurrent.futures
 import contextlib
 import dataclasses
+import datetime
 import pathlib
 import shutil
 import signal
@@ -60,6 +61,7 @@ __all__ = [
     "parse_frames",
     "run_master",
     "run_sequence",
+    "run_stamp",
 ]
 
 PREVIOUS_PIPELINE_SECONDS_PER_FRAME = 46.85
@@ -527,9 +529,34 @@ def default_output_dir() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[2]
 
 
-def default_output_name(source: SourceSet, spec: encode.EncodeSpec, frames: Sequence[int]) -> str:
-    """`<stem>.<first>-<last>.<WxH>.<codec>.mp4` -- enough to tell renders apart."""
-    return f"{source.stem}.{frames[0]}-{frames[-1]}.{spec.width}x{spec.height}.{spec.codec}.mp4"
+def run_stamp(when: datetime.datetime | None = None) -> str:
+    """`YYYYMMDD_HHMMSS` in local time, for the auto-generated output names (P5).
+
+    No colons: they are illegal in Windows filenames. Local time rather than UTC because
+    the name is for the person who started the render. Sortable either way.
+
+    **Call this once per run and pass the result around.** A second call can land in the
+    next second, and for the MP4 path the name also determines the segment directory, so
+    two stamps in one job would scatter the segments across two places.
+    """
+    return (when or datetime.datetime.now()).strftime("%Y%m%d_%H%M%S")
+
+
+def default_output_name(source: SourceSet, stamp: str) -> str:
+    """`<stem>_<date>_<time>.mp4` -- the naming the user asked for in P5.
+
+    It replaced `<stem>.<first>-<last>.<WxH>.<codec>.mp4`, which said more about the
+    render but could not tell two runs of the same command apart. A timestamp can, and
+    that is the trade: **an auto-generated name is a new file every run, so it does not
+    resume.** Pass `--out` explicitly to resume a previous one; the run prints the path
+    it chose for exactly that purpose.
+    """
+    return f"{source.stem}_{stamp}.mp4"
+
+
+def default_master_dir_name(source: SourceSet, stamp: str) -> str:
+    """`<stem>_<date>_<time>` -- the directory a frame-mode run fills (P5)."""
+    return f"{source.stem}_{stamp}"
 
 
 def frames_in_segments(job: SequenceJob) -> Iterable[int]:
@@ -579,12 +606,28 @@ class MasterJob:
     frames: tuple[int, ...]
     directory: pathlib.Path
     width: int
-    """Master width, 2:1. Always the source's native density (`Rig.native_width`) -- a
-    master is not a delivery, so there is no ladder to choose from."""
+    """Master width, 2:1, and it **must** be the source's native density.
+
+    The user's P5 constraint: frame mode outputs at the input's own size and applies no
+    compression. Both halves are structural here rather than conventional --
+    :meth:`__post_init__` refuses any other width, and this sink has no codec, no
+    bitrate and no delivery-size option to apply even if one were passed. The only
+    resizing in the project happens on the *delivery* path, inside ffmpeg
+    (:attr:`vr_compose.encode.EncodeSpec.master`).
+
+    "Native density" means `Rig.native_width(tile_size)`, which for a 90-degree rig is
+    four times the tile: 1920-pixel tiles give a 7680x3840 master. See AGENTS.md
+    section 3 -- that width is where the panorama samples the render neither more nor
+    less finely than it was drawn."""
     compress_level: int = 1
-    """Pillow's zlib level. 1 costs 0.68 s a frame against 6's 2.77 s for about 10% more
-    bytes (AGENTS.md section 8); a master is an intermediate, so time is worth more than
-    the bytes. The *pixels* are identical either way -- only the file differs."""
+    """zlib level for the PNG. **Lossless at every setting**, so it is not "compression"
+    in the sense that costs quality: level 0 stores the samples verbatim and level 9
+    packs them hardest, and every level decodes to the same pixels -- `tests/
+    test_master.py` asserts that against the stitcher's output.
+
+    1 by default: it costs 0.68 s a frame against 6's 2.77 s for about 10% more bytes
+    (AGENTS.md section 8), and a master is an intermediate, so time is worth more than
+    the bytes. Pass 0 for literally uncompressed files, at roughly 2.3x the disk."""
     decode_workers: int = 4
     warp_threads: int = DEFAULT_THREADS
     sampler: str = DEFAULT_SAMPLER
@@ -615,6 +658,13 @@ class MasterJob:
             raise ValueError("no frames to process")
         if self.width < 2 or self.width % 2:
             raise ValueError(f"master width must be even and positive, got {self.width}")
+        tile = self.source.tile_size
+        if tile is not None and self.width != self.rig.native_width(tile):
+            raise ValueError(
+                f"a master is written at the input's own density: {tile}px tiles give "
+                f"{self.rig.native_width(tile)} wide, not {self.width}. Frame mode has no "
+                "delivery size -- use `frame --width` for a one-off at another size."
+            )
         if not 0 <= self.compress_level <= 9:
             raise ValueError(f"compress_level must be 0..9, got {self.compress_level}")
         if self.bit_depth not in BIT_DEPTHS:
@@ -627,8 +677,12 @@ class MasterJob:
         return self.width // 2
 
     def frame_path(self, frame: int) -> pathlib.Path:
-        """Mirrors the source's own numbering, so masters sort beside their inputs."""
-        return self.directory / f"{self.source.stem}.{frame:0{self.source.frame_digits}d}.png"
+        """`<stem>_S_<frame>.png`, the naming the user asked for in P5.
+
+        The frame number keeps the source's own zero padding, so a directory listing
+        sorts the way the source does -- unpadded, `999` would sort after `1000`.
+        """
+        return self.directory / f"{self.source.stem}_S_{frame:0{self.source.frame_digits}d}.png"
 
     def pending_frames(self) -> tuple[int, ...]:
         """Frames still to render. Consulted *before* decoding, not after."""

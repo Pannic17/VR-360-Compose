@@ -44,14 +44,13 @@ def still_source(tmp_path_factory: pytest.TempPathFactory) -> source.SourceSet:
 
 
 def _job(src: source.SourceSet, directory: pathlib.Path, **overrides: object) -> pipeline.MasterJob:
-    options: dict[str, object] = dict(stats_every=2)
+    options: dict[str, object] = dict(stats_every=2, width=NATIVE)
     options.update(overrides)
     return pipeline.MasterJob(
         source=src,
         rig=rig_for(src.camera_count),
         frames=FRAMES,
         directory=directory,
-        width=NATIVE,
         **options,  # type: ignore[arg-type]
     )
 
@@ -71,7 +70,7 @@ def test_master_pixels_equal_the_frame_command(
     tiles = io.load_tiles(still_source, FRAMES[0], list(rig.unique_indices))
     reference = stitch_frame(tiles, rig, NATIVE).image
 
-    written = tmp_path / "out" / f"S.{FRAMES[0]:04d}.png"
+    written = tmp_path / "out" / f"S_S_{FRAMES[0]:04d}.png"
     with Image.open(written) as image:
         assert image.mode == "RGB", "no alpha: the reference product's 253..255 was blend debris"
         assert np.array_equal(np.asarray(image), reference), "pixels must match the stitcher"
@@ -81,15 +80,50 @@ def test_master_pixels_equal_the_frame_command(
     assert written.read_bytes() == direct.read_bytes(), "same level, same bytes"
 
 
-def test_masters_are_named_like_their_source(
+def test_masters_are_named_stem_S_frame(
     still_source: source.SourceSet, tmp_path: pathlib.Path
 ) -> None:
+    """P5: `<stem>_S_<frame>.png`, keeping the source's zero padding so listings sort."""
     job = _job(still_source, tmp_path / "out")
     pipeline.run_master(job)
     assert sorted(p.name for p in (tmp_path / "out").glob("*.png")) == [
-        f"S.{frame:04d}.png" for frame in FRAMES
+        f"S_S_{frame:04d}.png" for frame in FRAMES
     ]
-    assert job.frame_path(3).name == "S.0003.png", "the source's own zero padding"
+    assert job.frame_path(3).name == "S_S_0003.png"
+    assert job.frame_path(999).name == "S_S_0999.png", "padded, or 999 sorts after 1000"
+
+
+def test_frame_mode_is_lossless_and_at_the_input_density(
+    still_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The user's P5 constraint, made structural rather than conventional.
+
+    Frame mode has no codec, no bitrate and no delivery size to apply, and the width is
+    refused outright if it is not what the input implies. The "no compression" half is
+    about *lossy* compression: zlib is lossless at every level, which the pixel-identity
+    assertion below states as an executable fact rather than a claim.
+    """
+    rig = rig_for(still_source.camera_count)
+    tile = still_source.tile_size
+    assert tile is not None
+    assert rig.native_width(tile) == NATIVE
+
+    for wrong in (NATIVE // 2, NATIVE * 2, NATIVE + 2):
+        with pytest.raises(ValueError, match="input's own density"):
+            _job(still_source, tmp_path / "out", width=wrong)
+
+    # every zlib level decodes to the same pixels, so none of them is "compression"
+    reference: np.ndarray | None = None
+    for level in (0, 1, 9):
+        directory = tmp_path / f"level{level}"
+        pipeline.run_master(_job(still_source, directory, compress_level=level))
+        with Image.open(directory / f"S_S_{FRAMES[0]:04d}.png") as image:
+            pixels = np.asarray(image)
+        if reference is None:
+            reference = pixels
+        else:
+            assert np.array_equal(pixels, reference), f"zlib level {level} changed a pixel"
+    assert (tmp_path / "level0").exists()
 
 
 def test_resume_skips_present_frames_without_decoding_them(
@@ -117,7 +151,7 @@ def test_an_interrupted_write_cannot_be_mistaken_for_a_finished_frame(
     job = _job(still_source, tmp_path / "out")
     directory = tmp_path / "out"
     directory.mkdir()
-    (directory / "S.0002.png.part").write_bytes(b"half a PNG")
+    (directory / "S_S_0002.png.part").write_bytes(b"half a PNG")
     assert 2 in job.pending_frames(), "a .part must not count as present"
 
     pipeline.run_master(job)
@@ -142,7 +176,7 @@ def test_cancellation_keeps_finished_masters_and_resumes(
     # Writes already submitted are frames already stitched, so they are allowed to land
     # rather than being cancelled -- otherwise a resume would redo their warp.
     present = sorted(p.name for p in (tmp_path / "out").glob("*.png"))
-    assert present == ["S.0001.png", "S.0002.png"], present
+    assert present == ["S_S_0001.png", "S_S_0002.png"], present
     assert not list((tmp_path / "out").glob("*.part"))
 
     resumed = pipeline.run_master(job)
@@ -190,17 +224,23 @@ def test_a_plan_of_the_wrong_size_is_refused(
         pipeline.run_master(job, plan=wrong)
 
 
-def test_job_validation() -> None:
-    rig = twenty_file_rig()
-    common = dict(rig=rig, frames=FRAMES, directory=pathlib.Path("x"), width=NATIVE)
+def test_job_validation(still_source: source.SourceSet) -> None:
+    """A real source, because the width check reads the tile size off it."""
+    common: dict[str, object] = dict(
+        source=still_source,
+        rig=twenty_file_rig(),
+        frames=FRAMES,
+        directory=pathlib.Path("x"),
+        width=NATIVE,
+    )
     with pytest.raises(ValueError, match="no frames"):
-        pipeline.MasterJob(source=None, **{**common, "frames": ()})  # type: ignore[arg-type]
+        pipeline.MasterJob(**{**common, "frames": ()})  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="even and positive"):
-        pipeline.MasterJob(source=None, **{**common, "width": 255})  # type: ignore[arg-type]
+        pipeline.MasterJob(**{**common, "width": 255})  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="compress_level"):
-        pipeline.MasterJob(source=None, compress_level=11, **common)  # type: ignore[arg-type]
+        pipeline.MasterJob(**{**common, "compress_level": 11})  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="write_workers"):
-        pipeline.MasterJob(source=None, write_workers=0, **common)  # type: ignore[arg-type]
+        pipeline.MasterJob(**{**common, "write_workers": 0})  # type: ignore[arg-type]
 
 
 def test_sixteen_bit_masters_keep_sub_level_precision(
@@ -217,7 +257,7 @@ def test_sixteen_bit_masters_keep_sub_level_precision(
     assert eight.written == sixteen.written == len(FRAMES)
     assert sixteen.bytes_written > eight.bytes_written, "twice the depth, more bytes"
 
-    deep = tmp_path / "sixteen" / f"S.{FRAMES[0]:04d}.png"
+    deep = tmp_path / "sixteen" / f"S_S_{FRAMES[0]:04d}.png"
     header = deep.read_bytes()[8:33]
     assert header[4:8] == b"IHDR"
     assert header[16] == 16, "bit depth in the IHDR"
@@ -225,7 +265,7 @@ def test_sixteen_bit_masters_keep_sub_level_precision(
 
     with Image.open(deep) as image:
         high_byte = np.asarray(image.convert("RGB"))
-    with Image.open(tmp_path / "eight" / f"S.{FRAMES[0]:04d}.png") as image:
+    with Image.open(tmp_path / "eight" / f"S_S_{FRAMES[0]:04d}.png") as image:
         shallow = np.asarray(image)
 
     # 257 maps 255 exactly onto 65535, so the two agree to within a rounding step

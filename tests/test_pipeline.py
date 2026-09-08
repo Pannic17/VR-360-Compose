@@ -9,6 +9,7 @@ wrong rig before it wastes a run.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import pathlib
 import signal
@@ -509,11 +510,21 @@ def test_a_dead_encoder_is_a_failure_not_a_cancellation(
 
 def test_default_output_lands_beside_the_program(tmp_path: pathlib.Path) -> None:
     src = _fake_source(tmp_path, frames=(1, 2, 3))
-    spec = EncodeSpec(WIDTH, HEIGHT, "h265", 2000, 30)
-    assert pipeline.default_output_name(src, spec, [1, 2, 3]) == "S.1-3.256x128.h265.mp4"
+    assert pipeline.default_output_name(src, "20260908_163000") == "S_20260908_163000.mp4"
+    assert pipeline.default_master_dir_name(src, "20260908_163000") == "S_20260908_163000"
     base = pipeline.default_output_dir()
     assert base.is_dir()
     assert (base / "pyproject.toml").exists(), "from source, the default is the project root"
+
+
+def test_the_run_stamp_is_sortable_and_filename_safe() -> None:
+    stamp = pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 30, 5))
+    assert stamp == "20260908_163005"
+    assert ":" not in stamp, "illegal in Windows filenames"
+    # lexical order is chronological, which is the point of the layout
+    later = pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 30, 6))
+    assert stamp < later
+    assert pipeline.run_stamp() != "", "the no-argument form reads the clock"
 
 
 def test_refuses_to_start_on_a_full_disk(

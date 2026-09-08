@@ -5,8 +5,8 @@
 
 仓库：<https://github.com/Pannic17/VR-360-Compose>
 
-**进度**：P0–P4 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质）。
-下一步 P5：输出命名与单帧模式。
+**进度**：P0–P5 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质、
+输出命名与帧模式）。下一步 P6：交付合规与色彩管线调优。
 阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)。
 
 ---
@@ -51,8 +51,10 @@ vr-compose --source E:/22 sequence --frames 1656-2433
 ```
 
 第三条就是正式渲染：输出落在程序所在目录，文件名自动生成为
-`L_Cathedral.1656-2433.7680x3840.h264.mp4`，默认 8K / H.264 / 200 Mbps / 30 fps。
-中途 Ctrl-C 了，**原样再跑一遍**就从断点续上。
+`L_Cathedral_20260908_163000.mp4`（`<stem>_<日期>_<时间>`），默认 8K / H.264 / 200 Mbps / 30 fps。
+
+**自动命名每次跑都是新名字，所以它不会续跑。** 中途 Ctrl-C 想接着跑，
+把日志里那行 `output :` 的路径用 `--out` 传回去 —— 那时才按分段续跑。
 
 ## 命令详解
 
@@ -98,7 +100,7 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--codec` | `h264` | `h264` / `h265` |
 | `--bitrate` | `high` | 8k 档：high 200 / mid 150 / low 100 Mbps；4k 档：57 / 43 / 28 Mbps |
 | `--fps` | `30` | `30` / `60`，GOP 随之为 60 / 120 帧（2 秒） |
-| `--out` | 程序目录下自动命名 | 输出 .mp4 路径 |
+| `--out` | 程序目录下自动命名 | 视频模式是 .mp4 路径，帧模式是**目录**。自动命名是 `<stem>_<日期>_<时间>`，**每次跑都是新名字，所以不会续跑**；要续跑就把上次那条路径显式传进来 |
 | `--stem` | | 目录里有多个文件 stem 时选择要处理的集合 |
 | `--out-format` | `mp4` | `mp4` 交付；`png` 出无损母版序列（按源的原生密度，一帧一个文件）；`exr` 预留未实现 |
 | `--sampler` | `catmullrom` | 分数位置怎么读 tile：`catmullrom` 最还原（对源 +1.24 dB），`bilinear` 快 2.8 倍但更软，`nearest` 是 P1 基准/预览档 |
@@ -115,8 +117,19 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--keep-segments` | | 合并后保留分段文件 |
 | `--no-bar` | | 不显示进度条，只输出普通日志行 |
 
-**母版序列**：`--out-format png` 时 `--out` 是**目录**，一帧一个无损 PNG，按源的原生密度
-（本 rig = 4× tile），文件名沿用源的编号（`L_Cathedral.1656.png`）。
+## 两种输出模式
+
+| | 视频模式（默认） | 帧模式 `--out-format png` |
+|---|---|---|
+| 产物 | 一个 `<stem>_<日期>_<时间>.mp4` | 一个 `<stem>_<日期>_<时间>/` 目录，里面是 `<stem>_S_<帧号>.png` |
+| 尺寸 | 按 `--size` 交付（8k/4k），需要时由 ffmpeg 降采样 | **按 input 自己的密度**（本 rig = 4× tile，即 7680×3840），**不接受 `--size`** |
+| 压缩 | 走 H.264/H.265 有损压缩 | **无损**。PNG 的 zlib 等级只影响文件大小和耗时，**不改变任何一个像素**（有测试断言）；要纯存储用 `--compress-level 0`，磁盘约 2.3 倍 |
+| 续跑 | 按分段（需显式 `--out`） | 按文件存在（需显式 `--out`） |
+
+这两条限制在帧模式里是**结构性**的，不是约定：那条路径根本没有 codec / 码率 / 交付尺寸可用，
+而母版宽度不等于 input 推出来的密度时会直接报错。
+
+**母版序列细节**：一帧一个无损 PNG，文件名 `<stem>_S_<帧号>.png`，帧号沿用源的补零位数。
 实测 8K **2.40 s/帧、39.6 MiB/帧**，778 帧约 30 GiB —— 是同长度 MP4 的 15 倍，所以它是按需产出的
 （P4 比画质、归档），不是交付路径。按文件存在续跑，`--compress-level` 只影响文件大小不影响像素。
 这时候 `--codec / --bitrate / --fps / --size` 之类会**明确报错**而不是被忽略。
@@ -229,7 +242,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 249 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 253 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools

@@ -211,7 +211,7 @@ def test_png_masters_land_at_the_native_density(
          "--out", str(out), "--no-bar"]
     )  # fmt: skip
     assert code == 0
-    assert sorted(p.name for p in out.glob("*.png")) == ["S.0001.png", "S.0002.png"]
+    assert sorted(p.name for p in out.glob("*.png")) == ["S_S_0001.png", "S_S_0002.png"]
     printed = capsys.readouterr().out
     assert "master     : 256x128 8-bit PNG" in printed, printed
     assert "2 master(s)" in printed
@@ -246,3 +246,47 @@ def test_exr_says_why_it_is_not_implemented(tmp_path: pathlib.Path) -> None:
         main(["--source", str(tmp_path / "src"), "sequence", "--out-format", "exr", "--no-bar"])
     message = str(caught.value)
     assert "8-bit" in message and "--out-format png" in message
+
+
+def test_auto_named_output_uses_the_stem_and_a_timestamp(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P5 naming, both modes, and the stamp taken exactly once per run.
+
+    Once matters: for the MP4 path the segment directory is derived from the output name,
+    so a second reading of the clock could scatter one job's segments across two places.
+    """
+    from vr_compose import pipeline
+
+    _png_source(tmp_path / "src")
+    calls: list[str] = []
+
+    def one_stamp(*_args: object, **_kwargs: object) -> str:
+        calls.append("read")
+        return f"20260908_16300{len(calls)}"
+
+    monkeypatch.setattr(pipeline, "run_stamp", one_stamp)
+    monkeypatch.setattr(pipeline, "default_output_dir", lambda: tmp_path / "beside")
+
+    assert main(["--source", str(tmp_path / "src"), "sequence", "--out-format", "png",
+                 "--no-bar"]) == 0  # fmt: skip
+    assert calls == ["read"], "the clock is read once per run"
+    made = sorted(p.name for p in (tmp_path / "beside").iterdir())
+    assert made == ["S_20260908_163001"], made
+    assert sorted(p.name for p in (tmp_path / "beside" / made[0]).glob("*.png")) == [
+        "S_S_0001.png",
+        "S_S_0002.png",
+    ]
+
+    calls.clear()
+    printed = capsys.readouterr()
+    assert "S_20260908_163001" in printed.out, "the chosen path is printed, to allow resume"
+
+
+def test_the_video_name_is_stem_and_timestamp(tmp_path: pathlib.Path) -> None:
+    from vr_compose import pipeline
+    from vr_compose import source as source_mod
+
+    _png_source(tmp_path / "src")
+    chosen = next(s for s in source_mod.scan(tmp_path / "src") if s.usable)
+    assert pipeline.default_output_name(chosen, "20260908_163000") == "S_20260908_163000.mp4"
