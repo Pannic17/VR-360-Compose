@@ -26,10 +26,10 @@
 - Windows，Python **3.13**
 - **ffmpeg + ffprobe**，带 `libx264` 和 `libx265`（放在程序同级目录，或在 PATH 上；
   程序先找同级目录）
-- 内存：8K 渲染时 Python 侧约 3 GB，ffmpeg 另占约 15 GB（实测峰值 14.77 GiB —— x264 默认
-  `threads=auto` 在 8K 上按线程数分配帧缓冲，本机 48 线程）。**设计上不设内存预算，软上限 64 GB。**
-  内存紧的机器要降这一项：改用 x264 片级并行（`sliced-threads=1`，实测 5.81 GiB，吞吐只掉 2%），
-  开关正在做，见 ROADMAP P3 第 0 项
+- 内存：8K 一次作业实测峰值 **23.8 GiB**（拼接侧 3.7 + ffmpeg 20.1，已提交字节），
+  **与总帧数无关**（60 帧和 180 帧完全一样）。**不设内存预算，软上限 64 GB，超了只打 Warning，
+  不会中断。** 内存紧的机器加 `--encoder-threads 16`：实测峰值降到 **9.8 GiB（−59%）**，
+  吞吐只掉 4%（2.24 → 2.33 s/帧）
 - 磁盘：8K 200 Mbps 的 778 帧约 2 GB；程序启动前会检查空间，不够会拒绝开始
 
 ## 安装
@@ -105,6 +105,7 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--stats-every` | `100` | 每多少帧做一次几何自检 |
 | `--decode-workers` | `4` | 解码线程；**多于 4 会拖慢 warp**（GIL 争用，实测） |
 | `--warp-threads` | `8` | 重投影线程 |
+| `--encoder-threads` | 不设 | 给编码器的线程上限，用来压它的内存：不设时整机峰值约 24 GiB、最快；给 16 降到约 10 GiB，吞吐掉 4%。只是脚印旋钮，**不影响可复现性** |
 | `--no-resume` | | 忽略已完成的分段，全部重编 |
 | `--keep-segments` | | 合并后保留分段文件 |
 | `--no-bar` | | 不显示进度条，只输出普通日志行 |
@@ -182,6 +183,10 @@ GPU 加速列为可选项（估计 warp 可到 30–40 ms，778 帧约 3 分钟�
 
 **`Refusing to start`（磁盘）** —— 输出目录所在盘的空间不够估算的产物大小（分段 + 合并文件 + 余量）。
 
+**Ctrl-C 之后怎么办？** 原样再跑一遍就续上。取消在**帧边界**生效，所以按下之后最多再等一帧
+（8K 约 2 s）才退出，退出码是 130；这样不会有半帧写进编码器。急的话再按一次 Ctrl-C 立刻中断。
+完成的分段一定保留，`.part` 一定清掉。
+
 **续跑出来的文件和一次跑完的不一样？** —— 默认模式下两者**结构相同**（帧数、GOP、合规性全一致），
 x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；x265 在多线程下本来就不可复现。
 要逐字节一致就加 `--deterministic`（编码器慢 6–8 倍）。原因与实测见 AGENTS.md 第 5 节。
@@ -189,7 +194,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 197 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 214 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools
@@ -210,6 +215,7 @@ src/vr_compose/
   encode.py       ffmpeg 定位、level/tier 计算、分段写入、探针、拼接
   pipeline.py     解码预取 -> warp -> 分段编码 -> 拼接，可续跑
   verify.py       几何自检（指标 A）与环绕接缝检查
+  memory.py       峰值内存测量与 64 GB 软上限告警
   io.py           读 tile（丢掉无用的 alpha）、写 PNG
   cli.py          discover / frame / sequence
 tests/            pytest；真实数据的检查单独标记，数据不在时自动跳过

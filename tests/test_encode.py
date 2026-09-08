@@ -7,6 +7,8 @@ ffmpeg and are skipped where it is absent.
 from __future__ import annotations
 
 import pathlib
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -96,6 +98,16 @@ def test_master_defaults_to_the_delivery_size() -> None:
     assert not spec.downsamples
 
 
+def test_ffmpeg_gets_its_own_process_group() -> None:
+    """So a console Ctrl-C reaches only us. Without this the encoder dies first and
+    cancellation is reported as an encoder failure -- see child_creation_flags."""
+    flags = encode.child_creation_flags()
+    if sys.platform == "win32":
+        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert flags == 0
+
+
 def _joined(args: list[str]) -> str:
     return " ".join(args)
 
@@ -174,6 +186,29 @@ def test_the_4k_delivery_comes_off_the_8k_master() -> None:
 def test_no_resize_filter_without_a_master() -> None:
     args = _joined(EncodeSpec.for_size("8k", "h264", "high", 30).video_args())
     assert "flags=lanczos" not in args and "scale=in_range=full" in args
+
+
+def test_encoder_threads_caps_the_footprint_per_codec() -> None:
+    """Measured: x264's commit follows *frame* threads, so the cap switches it to slice
+    threading; x265 needs its own knobs. Reproduce with tools/encode_probe.py memory."""
+    x264 = _joined(EncodeSpec.for_size("8k", "h264", "high", 30, encoder_threads=16).video_args())
+    assert "sliced-threads=1:threads=16" in x264
+    x265 = _joined(EncodeSpec.for_size("8k", "h265", "high", 30, encoder_threads=8).video_args())
+    assert "pools=8:frame-threads=2" in x265
+    # unset means untouched: no thread parameter at all
+    for codec in ("h264", "h265"):
+        args = _joined(EncodeSpec.for_size("8k", codec, "high", 30).video_args())
+        assert "threads=" not in args and "pools=" not in args, codec
+
+
+def test_encoder_threads_is_not_a_determinism_knob() -> None:
+    """Slice threading measured non-reproducible, so the two flags must stay independent:
+    asking for a smaller footprint must not silently drop the determinism pin."""
+    spec = EncodeSpec.for_size("8k", "h264", "high", 30, encoder_threads=16, deterministic=True)
+    args = _joined(spec.video_args())
+    assert "threads=1" in args, "deterministic still pins threads=1"
+    with pytest.raises(ValueError, match="encoder_threads"):
+        EncodeSpec.for_size("8k", "h264", "high", 30, encoder_threads=0)
 
 
 def test_describe_is_human_readable() -> None:

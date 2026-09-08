@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import signal
+import sys
+import threading
 import types
 
 import numpy as np
@@ -151,12 +154,13 @@ def _job(
 ) -> SequenceJob:
     options: dict[str, object] = dict(segment_gops=1, stats_every=50, keep_segments=True)
     options.update(overrides)
+    frames = options.pop("frames", FRAMES)
     spec_kwargs = {key: options.pop(key) for key in ("deterministic", "master") if key in options}
     return SequenceJob(
         source=src,
         rig=rig_for(src.camera_count),
         spec=EncodeSpec(WIDTH, HEIGHT, codec, 2000, 30, **spec_kwargs),  # type: ignore[arg-type]
-        frames=FRAMES,
+        frames=frames,  # type: ignore[arg-type]
         output=out,
         **options,  # type: ignore[arg-type]
     )
@@ -218,6 +222,57 @@ def test_a_plan_for_the_delivery_size_is_refused_when_a_master_is_asked_for(
     delivery_plan = WarpPlan.build(job.rig, WIDTH, HEIGHT, TILE)
     with pytest.raises(ValueError, match="does not match this job"):
         pipeline.run_sequence(job, plan=delivery_plan)
+
+
+@needs_ffmpeg
+def test_the_memory_soft_limit_warns_and_does_not_stop_the_run(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """A limit of one byte is certain to be exceeded. The run must still succeed.
+
+    "Advisory" is the kind of property that regresses quietly into "fatal", and the cost
+    of that regression is a refused render on a machine that could have done the work.
+    """
+    job = _job(moving_source, tmp_path / "out.mp4", memory_soft_limit=1)
+    summary = pipeline.run_sequence(job)
+
+    assert summary.problems == (), "the cap must not become a conformance failure"
+    assert summary.stream.frames == 130 and summary.output.exists()
+    assert len(summary.warnings) == 1, summary.warnings
+    assert "soft limit" in summary.warnings[0] and "not affected" in summary.warnings[0]
+
+
+@needs_ffmpeg
+def test_a_generous_limit_produces_no_warning_but_still_reports(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    summary = pipeline.run_sequence(_job(moving_source, tmp_path / "out.mp4"))
+    assert summary.warnings == ()
+    if sys.platform == "win32":
+        assert summary.peak.measured and summary.peak.encoder > 0
+        assert "committed" in summary.peak.report()
+
+
+@needs_ffmpeg
+def test_the_encoder_footprint_does_not_grow_with_frame_count(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """Each segment is its own ffmpeg, so the encoder's peak is a per-segment property.
+
+    Only the encoder side is checked here: `peak.stitcher` is this *process's* lifetime
+    high-water mark, and under pytest that includes every other test, so it cannot be
+    compared between runs. The stitcher side is verified by two real 8K runs of different
+    lengths (AGENTS.md section 8).
+    """
+    if sys.platform != "win32":
+        pytest.skip("Windows memory counters")
+    short = pipeline.run_sequence(_job(moving_source, tmp_path / "short.mp4", frames=FRAMES[:60]))
+    full = pipeline.run_sequence(_job(moving_source, tmp_path / "full.mp4"))
+    assert full.frames == 130 and short.frames == 60
+    assert full.peak.encoder == pytest.approx(short.peak.encoder, rel=0.5), (
+        short.peak.encoder,
+        full.peak.encoder,
+    )
 
 
 RESUME_CASES = [
@@ -313,7 +368,10 @@ def test_geometry_gate_stops_a_wrong_rig_before_anything_is_written(
 
 
 class _Cancelled(Exception):
-    """Stands in for Ctrl-C: raised from the progress callback mid-segment."""
+    """An arbitrary exception from the progress callback: covers the generic abort path.
+
+    Cancellation proper is `threading.Event` / Ctrl-C, covered below -- this one exists to
+    prove that *any* escape leaves no partial file."""
 
 
 @needs_ffmpeg
@@ -339,6 +397,114 @@ def test_cancel_mid_segment_leaves_no_partial_and_resumes(
     resumed = pipeline.run_sequence(job)
     assert resumed.skipped_segments == 1 and resumed.encoded == 70
     assert resumed.problems == () and resumed.stream.frames == 130
+
+
+@needs_ffmpeg
+def test_the_cancel_event_stops_at_a_frame_boundary_and_resumes(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """What Ctrl-C now does: a flag the frame loop checks, so no frame is cut in half.
+
+    The signal handler is the only part not exercised here -- a keypress cannot be
+    synthesised in-process -- and it does nothing but set this same event.
+    """
+    job = _job(moving_source, tmp_path / "out.mp4")
+    stop = threading.Event()
+
+    def cancel_at_70(report: Progress) -> None:
+        if report.done == 70:
+            stop.set()
+
+    with pytest.raises(pipeline.Cancelled, match="cancelled after 70 of 130"):
+        pipeline.run_sequence(job, progress=cancel_at_70, cancel=stop)
+
+    finished = sorted(job.segment_dir.glob("*.mp4"))
+    assert [p.name.split(".")[2] for p in finished] == ["1-60"]
+    assert not list(job.segment_dir.glob("*.part"))
+    assert not job.output.exists()
+    assert not list(tmp_path.glob("*.part")), "concat must not leave one beside the output"
+
+    resumed = pipeline.run_sequence(job)
+    assert resumed.skipped_segments == 1 and resumed.encoded == 70
+    assert resumed.problems == () and resumed.stream.frames == 130
+
+
+@needs_ffmpeg
+def test_the_sigint_handler_is_put_back(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """Leaving our handler installed would swallow every later Ctrl-C in the process.
+
+    Checked on both exits -- the clean one and the cancelled one -- because they restore
+    through different paths.
+    """
+    before = signal.getsignal(signal.SIGINT)
+
+    pipeline.run_sequence(_job(moving_source, tmp_path / "clean.mp4"))
+    assert signal.getsignal(signal.SIGINT) is before
+
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(pipeline.Cancelled):
+        pipeline.run_sequence(_job(moving_source, tmp_path / "stopped.mp4"), cancel=stop)
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_cancel_set_before_the_run_stops_it_immediately(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """No segment is even opened, so nothing has to be cleaned up."""
+    stop = threading.Event()
+    stop.set()
+    job = _job(moving_source, tmp_path / "out.mp4")
+    with pytest.raises(pipeline.Cancelled, match="cancelled after 0 of 130"):
+        pipeline.run_sequence(job, cancel=stop)
+    assert not job.segment_dir.exists() or not list(job.segment_dir.glob("*"))
+
+
+@needs_ffmpeg
+def test_a_dead_encoder_is_a_failure_not_a_cancellation(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Killing the segment's ffmpeg is the shape a console Ctrl-C used to take.
+
+    On Windows the interrupt reaches every process on the console, so ffmpeg died first
+    and the pipeline reported "ffmpeg exited early" -- a failure, with an empty message,
+    indistinguishable from a real encoder crash. `child_creation_flags` now keeps the
+    interrupt away from ffmpeg, which leaves this path meaning only what it says: the
+    encoder really did die. It must stay a failure, and it must still leave the disk
+    resumable.
+    """
+    writers: list[encode.SegmentWriter] = []
+    original = encode.SegmentWriter.__init__
+
+    def spy(
+        self: encode.SegmentWriter,
+        tools: encode.Tools,
+        spec: EncodeSpec,
+        path: pathlib.Path,
+    ) -> None:
+        original(self, tools, spec, path)
+        writers.append(self)
+
+    monkeypatch.setattr(encode.SegmentWriter, "__init__", spy)
+    job = _job(moving_source, tmp_path / "out.mp4")
+
+    def kill_at_80(report: Progress) -> None:
+        if report.done == 80:
+            writers[-1]._process.kill()
+
+    with pytest.raises(RuntimeError, match="ffmpeg exited early") as caught:
+        pipeline.run_sequence(job, progress=kill_at_80)
+    assert not isinstance(caught.value, pipeline.Cancelled), (
+        "a dead encoder is a failure, not a cancellation"
+    )
+
+    assert [p.name.split(".")[2] for p in sorted(job.segment_dir.glob("*.mp4"))] == ["1-60"]
+    assert not list(job.segment_dir.glob("*.part")) and not job.output.exists()
+    monkeypatch.undo()
+    resumed = pipeline.run_sequence(job)
+    assert resumed.skipped_segments == 1 and resumed.stream.frames == 130
 
 
 def test_default_output_lands_beside_the_program(tmp_path: pathlib.Path) -> None:

@@ -16,6 +16,7 @@ ships them alongside, AGENTS.md §7), then on PATH.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import itertools
 import json
@@ -23,9 +24,12 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 
 import numpy as np
 import numpy.typing as npt
+
+from vr_compose import memory
 
 U8 = npt.NDArray[np.uint8]
 
@@ -82,6 +86,23 @@ H265_LEVELS: tuple[tuple[str, int, int, int, int], ...] = (
 )
 
 COLOUR_ARGS = ("-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709")
+
+
+def child_creation_flags() -> int:
+    """Put ffmpeg in its own process group, so a console Ctrl-C does not reach it.
+
+    On Windows a Ctrl-C is delivered to *every* process attached to the console, and
+    ffmpeg handles SIGINT itself: without this flag an interrupted run has its encoder
+    die first, and the pipeline then sees a broken pipe -- reporting "ffmpeg exited
+    early" with an empty message instead of "interrupted, re-run to resume". Cancellation
+    and a genuine encoder failure become indistinguishable.
+
+    With the flag, the interrupt reaches only this process, and killing ffmpeg stays the
+    exclusive job of :meth:`SegmentWriter.abort`. `kill()` works regardless of group.
+    """
+    if sys.platform != "win32":
+        return 0
+    return int(subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
 class FfmpegNotFound(RuntimeError):
@@ -212,6 +233,24 @@ class EncodeSpec:
     more frame-to-frame delta under identical scene motion. `None` means the stitcher
     renders the delivery size directly -- correct only when that *is* the native density.
     """
+    encoder_threads: int | None = None
+    """Cap the encoder's threading, for machines where its memory matters.
+
+    Left alone (the default), x264 runs `threads=auto` -- fastest, and measured at
+    **21.0 GiB of commit** at 8K on a 48-thread machine, which is far inside the 64 GB
+    soft limit (:mod:`vr_compose.memory`). Commit scales with *frame* threads, because
+    each one holds its own reference and interpolation planes: 16 threads commits
+    11.1 GiB, 8 commits 8.6 GiB.
+
+    Set, this switches x264 to slice-level threading (`sliced-threads=1:threads=N`), which
+    at N=16 commits **7.9 GiB** and still feeds 5.1 fps -- ten times what the 8K pipeline
+    asks of it. x265 gets `pools=N:frame-threads=2` (6.5 GiB at N=8, against 8.3 GiB for
+    its default). Reproduce with `tools/encode_probe.py memory`.
+
+    This is a throughput/footprint knob only. It does **not** buy determinism: slice
+    threading measured non-reproducible run to run, so `deterministic` remains the only
+    way to guarantee identical bytes.
+    """
     deterministic: bool = False
     """Force a run-to-run reproducible bitstream, at a throughput cost.
 
@@ -234,6 +273,8 @@ class EncodeSpec:
             raise ValueError("ultrafast downgrades H.264 to Constrained Baseline; use medium+")
         if self.fps <= 0 or self.bitrate_kbps <= 0:
             raise ValueError("fps and bitrate must be positive")
+        if self.encoder_threads is not None and self.encoder_threads < 1:
+            raise ValueError(f"encoder_threads must be >= 1, got {self.encoder_threads}")
         if self.width != 2 * self.height:
             raise ValueError(f"equirect output must be 2:1, got {self.width}x{self.height}")
         if self.master is not None:
@@ -338,6 +379,12 @@ class EncodeSpec:
             "+faststart",
         ]
         structure = f"bframes=0:open-gop=0:keyint={gop}:min-keyint={gop}:scenecut=0"
+        threads = self.encoder_threads
+        if self.codec == "h264":
+            if threads is not None:
+                structure += f":sliced-threads=1:threads={threads}"
+        elif threads is not None:
+            structure += f":pools={threads}:frame-threads=2"
         if self.codec == "h264":
             return [
                 "-c:v",
@@ -492,6 +539,8 @@ class SegmentWriter:
         self.path = path
         self.partial = path.with_name(path.name + ".part")
         self.frames = 0
+        self.peak_commit = 0
+        self.peak_resident = 0
         path.parent.mkdir(parents=True, exist_ok=True)
         self.partial.unlink(missing_ok=True)
         self._process: subprocess.Popen[bytes] = subprocess.Popen(
@@ -516,7 +565,19 @@ class SegmentWriter:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            creationflags=child_creation_flags(),
         )
+        # Drain stderr continuously. Read only at the end, a chatty ffmpeg would fill the
+        # 64 KiB pipe buffer and block forever waiting for us to read what we only read
+        # after it exits. `-loglevel error` keeps that rare, not impossible.
+        self._errors: list[bytes] = []
+        self._drain = threading.Thread(target=self._read_stderr, daemon=True)
+        self._drain.start()
+
+    def _read_stderr(self) -> None:
+        assert self._process.stderr is not None
+        for chunk in iter(lambda: self._process.stderr.read(4096), b""):  # type: ignore[union-attr]
+            self._errors.append(chunk)
 
     def write(self, frame: U8) -> None:
         # Masters go in; the delivery size comes out of ffmpeg (`EncodeSpec.master`).
@@ -526,19 +587,38 @@ class SegmentWriter:
         assert self._process.stdin is not None
         try:
             self._process.stdin.write(np.ascontiguousarray(frame).tobytes())
-        except BrokenPipeError:
-            raise RuntimeError(f"ffmpeg exited early:\n{self._stderr()}") from None
+        except OSError as exc:
+            # A dead reader is usually BrokenPipeError, but on Windows a killed ffmpeg
+            # also comes back as OSError EINVAL from the buffered writer's flush. Both
+            # mean the encoder is gone, and both have to arrive at the caller as
+            # something it reports rather than as a raw OSError traceback.
+            raise RuntimeError(
+                f"ffmpeg exited early (exit {self._process.poll()}, {exc}):\n{self._stderr()}"
+            ) from None
         self.frames += 1
 
     def _stderr(self) -> str:
-        assert self._process.stderr is not None
-        data: bytes = self._process.stderr.read()
-        return data.decode(errors="replace").strip()
+        """Everything ffmpeg has said. Repeatable: the drain thread owns the pipe."""
+        self._drain.join(timeout=2.0)
+        return b"".join(self._errors).decode(errors="replace").strip()
+
+    def _sample_memory(self) -> None:
+        """Record ffmpeg's high-water marks *before* it exits.
+
+        The encoder sizes its buffer pool up front, so one reading is the whole story --
+        but it has to be taken while the process is alive: after it exits the handle is
+        gone and the pid can be recycled.
+        """
+        self.peak_commit = max(self.peak_commit, memory.peak_commit(self._process.pid))
+        self.peak_resident = max(self.peak_resident, memory.peak_working_set(self._process.pid))
 
     def close(self) -> pathlib.Path:
         """Finish the segment. Raises if ffmpeg failed; returns the final path."""
+        self._sample_memory()
         assert self._process.stdin is not None
-        self._process.stdin.close()
+        # A dead encoder makes even the close fail; the exit code below says why.
+        with contextlib.suppress(OSError):
+            self._process.stdin.close()
         code = self._process.wait()
         err = self._stderr()
         if code != 0:
@@ -549,6 +629,7 @@ class SegmentWriter:
 
     def abort(self) -> None:
         """Kill ffmpeg and remove the partial file. For cancellation."""
+        self._sample_memory()
         if self._process.poll() is None:
             self._process.kill()
             self._process.wait()
@@ -564,6 +645,13 @@ class SegmentWriter:
             self.abort()
 
 
+def _run_concat(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Own process group, for the same reason the segment writers get one."""
+    return subprocess.run(
+        command, capture_output=True, text=True, creationflags=child_creation_flags()
+    )
+
+
 def concat(tools: Tools, segments: list[pathlib.Path], output: pathlib.Path) -> pathlib.Path:
     """Join segments losslessly. Valid because every segment starts on a closed GOP."""
     if not segments:
@@ -574,7 +662,7 @@ def concat(tools: Tools, segments: list[pathlib.Path], output: pathlib.Path) -> 
     )
     partial = output.with_name(output.name + ".part")
     try:
-        result = subprocess.run(
+        result = _run_concat(
             [
                 str(tools.ffmpeg),
                 "-hide_banner",
@@ -598,10 +686,14 @@ def concat(tools: Tools, segments: list[pathlib.Path], output: pathlib.Path) -> 
                 "-f",
                 "mp4",
                 str(partial),
-            ],
-            capture_output=True,
-            text=True,
+            ]
         )
+    except BaseException:
+        # Ctrl-C here would otherwise leave `<output>.mp4.part` beside the finished
+        # segments -- harmless to a resume, but the cancellation contract is that an
+        # interrupted run leaves no partial files anywhere.
+        partial.unlink(missing_ok=True)
+        raise
     finally:
         listing.unlink(missing_ok=True)
     if result.returncode != 0:

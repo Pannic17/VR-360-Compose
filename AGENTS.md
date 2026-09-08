@@ -399,6 +399,45 @@ H.264 与 H.265 在 200 Mbps 上基本打平（差 0.08 dB），只在 100 Mbps 
   极区压缩反而更「好」，因为它本来就是欠采样的糊图。
   **这说明极区问题在上游采样，不在编码器。**
 
+### 实测：编码器内存与 64 GB 软上限（P3）
+
+**没有内存预算。软上限 64 GB，超出只打 Warning，不报错、不中断**（用户 2026-09-08 决定）。
+`vr_compose.memory` 负责测量与告警，`vr-compose sequence` 每次跑完都打印。
+
+**先说度量本身**：比较配置要看 **commit（已提交字节）**，不要看 resident（工作集）。
+commit 是进程向系统要了多少、算在系统 commit limit 上的量，跟机器状态基本无关；
+resident 是「当时有多少在物理内存里」，Windows 会在缓存压力下修剪它 ——
+**同一条 8K 命令的 resident 实测在 6.5 / 8.6 / 14.8 GiB 之间跳过**，拿它比较配置会得出相反结论。
+
+8K h264 200 Mbps，75 帧噪声走管线真实 stdin 路径，`tools/encode_probe.py memory` 可复现：
+
+| x264 参数 | commit | resident | 喂入速率 |
+|---|---|---|---|
+| **默认（`threads=auto`，本机 48）** | **21.01 GiB** | 5.99 GiB | 7.32 fps |
+| `threads=16` | 11.11 GiB | 5.63 GiB | 4.92 fps |
+| `threads=8` | 8.59 GiB | 5.64 GiB | 3.23 fps |
+| `threads=4` | 7.38 GiB | 6.02 GiB | 2.12 fps |
+| `sliced-threads=1:threads=16` | **7.93 GiB** | 5.75 GiB | 5.06 fps |
+| `sliced-threads=1:threads=8` | 7.13 GiB | 5.79 GiB | 3.40 fps |
+
+| x265 参数 | commit | resident | 喂入速率 |
+|---|---|---|---|
+| 默认（`pools=auto`） | 8.29 GiB | 7.22 GiB | 4.94 fps |
+| `pools=16` | 7.50 GiB | 6.48 GiB | 4.12 fps |
+| `pools=8` | 6.83 GiB | 6.09 GiB | 2.61 fps |
+| `frame-threads=2` | 6.99 GiB | 5.95 GiB | 4.39 fps |
+| **`pools=8:frame-threads=2`** | **6.49 GiB** | 5.76 GiB | 2.58 fps |
+
+- 吃内存的是**帧级并行**：每个 frame thread 要自己持有 8K 的参考帧与半像素插值平面。
+  x264 的 commit 就是按帧线程数走的（21 → 11 → 8.6 → 7.4）。
+  切成**片级并行**后与线程数解耦，`sliced-threads=1:threads=16` 是 commit/吞吐最优的一档。
+- `-filter_threads 1` 实测无效（6.75 → 6.76 GiB resident）：**swscale 不是贡献者**，别在这上面花时间。
+- **`sliced-threads` 不能当 `--deterministic` 的替代品** —— 跑两遍比哈希不一致。已排除。
+- **默认不动 `threads=auto`**：21 GiB 远在软上限内，而它同时是最快的一档。
+  内存紧的机器用 `--encoder-threads N`：x264 走 `sliced-threads=1:threads=N`，
+  x265 走 `pools=N:frame-threads=2`。这只是脚印/吞吐旋钮，**不影响确定性**。
+- 管线只需要 **0.48 fps**（2.1 s/帧），上表最慢的一档也有 4 倍余量 —— 所以这里不必心疼编码器速度。
+
 ### 编码器的确定性（P2 实测，决定「续跑逐字节一致」能承诺什么）
 
 同一批帧喂两次，比较 elementary stream 与 MP4 的 SHA-256：
@@ -595,6 +634,31 @@ PySide6 + PyInstaller，Windows exe。以下数字来自 `tools/package_probe.py
 
 `stages` 分解在每段结束时打印，`vr-compose sequence` 结尾也汇总；以后任何吞吐回归先看它。
 
+### P3 实测：整机内存峰值（8K，h264 高档，同机）
+
+`vr-compose sequence` 自己测自己（`vr_compose.memory`，两侧都取进程的 commit 高水位）：
+
+| 配置 | commit 峰值 | 分解 | resident 峰值 | s/帧 |
+|---|---|---|---|---|
+| 60 帧 | **23.8 GiB** | 拼接 3.7 + 编码 20.1 | 10.5 GiB | 2.19 |
+| **180 帧** | **23.8 GiB** | 拼接 3.7 + 编码 20.1 | 10.5 GiB | 2.24 |
+| 180 帧 + `--encoder-threads 16` | **9.8 GiB** | 拼接 3.7 + 编码 **6.1** | 7.0 GiB | 2.33 |
+
+**帧数翻 3 倍，峰值一位小数都没变** —— 这就是「峰值与总帧数无关」的实测证据
+（第 2 节约束 7 要求的按帧流式处理确实成立）。23.8 GiB 相对 64 GB 软上限有 2.7 倍余量。
+
+`--encoder-threads 16` 在真实作业上把峰值降 **59%（23.8 → 9.8 GiB）**，
+代价只有 **4% 吞吐（2.24 → 2.33 s/帧）**。编码器那份 6.1 GiB 比噪声探针的 7.93 GiB 还低 ——
+真实画面要缓冲的比特比纯噪声少，所以探针的数字是保守的上界。
+
+- 报的是**两侧峰值之和**，是真实同时峰值的**上界**（两者的高水位不一定同一瞬间出现）。
+  告警宁可偏高。
+- 拼接侧的 3.7 GiB 与预期一致：843 MiB LUT + colour/weight/image 缓冲 + 两帧 tile + 每 band 的
+  gather 临时量。**注意它是「本进程生命周期」的高水位**，所以在长驻进程里（GUI、pytest）
+  会包含这个进程干过的其它事 —— 单次 CLI 运行才等于这次作业。
+- 16K 母版的估算：拼接侧约 10–12 GiB（LUT 约 3.4 GiB）+ 编码 20 GiB ≈ **30 GiB**，仍在软上限内。
+  真有 16K 数据时要实测。
+
 ### GPU 加速（可选，未决定）
 
 CPU 版已达标（2.0 s/帧 < 3 s），GPU 不是必需。列在这里是因为 warp 的形状（静态 843 MB 查找表 +
@@ -705,6 +769,33 @@ py -3.13 -m venv .venv
 - 长任务用 CLI 子命令暴露，参数显式，不要在代码里硬编码 `E:\22` 之外的路径；
   `E:\22` 作为只读参考路径可以出现在测试与文档里。
 - 日志用 `logging`，进度信息带上帧号与速率（s/帧），方便和第 5 节的基线对比。
+
+### P3 实测：取消语义（Windows 的 Ctrl-C 会打到 ffmpeg）
+
+Windows 的 Ctrl-C 发给**控制台里的每一个进程**，而 ffmpeg 自己处理 SIGINT。所以在加
+`CREATE_NEW_PROCESS_GROUP` 之前，被中断的一次运行是**编码器先死**，管线随后撞上断管，
+报出来的是 `ffmpeg exited early`（而且消息是空的）—— 也就是说
+**「用户按了 Ctrl-C」和「编码器真的挂了」在退出码和消息上完全无法区分**。
+磁盘状态一直是对的（完成分段保留、无 `.part`），错的是分类。
+
+已修，三处：
+
+1. **ffmpeg 进自己的进程组**（`encode.child_creation_flags()`），Ctrl-C 只到 Python，
+   杀 ffmpeg 重新成为 `SegmentWriter.abort()` 的专属职责。
+2. **取消是一等结果**：`pipeline.Cancelled`，由 `_CancelScope` 把 SIGINT 变成一个标志，
+   帧循环在**帧边界**检查它 —— 所以不会有半帧写进编码器，代价是取消最多晚一帧生效
+   （8K 约 2 s）。再按一次 Ctrl-C 会恢复默认处理器，立刻硬中断。
+   GUI（P6）与测试走同一个机制：`run_sequence(..., cancel=threading.Event())`，不碰信号。
+3. **`concat` 也清自己的 `.part`**，中断落在合并阶段时输出旁边不留残留。
+
+**顺手抓到的一个真 bug**：Windows 上被 kill 的 ffmpeg，往它 stdin 写数据抛的是
+`OSError: [Errno 22] Invalid argument`，**不是** `BrokenPipeError`。原来只接
+`BrokenPipeError`，所以真的编码器死亡会以裸 `OSError` 冒出去，CLI 的
+`except RuntimeError` 接不住 —— 用户会看到 traceback。现在接 `OSError` 全族，
+并把退出码与 stderr 一起放进消息。
+
+`SegmentWriter` 的 stderr 现在有**常驻 drain 线程**：原来只在结束时读一次，
+理论上 ffmpeg 输出超过 64 KiB 管道缓冲就会双向死锁（`-loglevel error` 只是让它很难触发）。
 
 ## 11. 尚未确认的事（不要自己替用户决定）
 

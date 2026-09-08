@@ -10,7 +10,7 @@
 | ✅ | **P0** 现状固化 | rig 反解完成，验证工具入库 `tools/` |
 | ✅ | **P1** 单帧正确 + 来源目录抽象 | `vr-compose frame` 可用，指标 A PASS |
 | ✅ | **P2** 序列吞吐 + 直出 MP4 | `vr-compose sequence`：778 帧 8K 实跑 **2.10 s/帧**（22.3×，~26 min），196.9 Mbps，可续跑，产物合规，186 个测试全绿 |
-| ▶ | **P3** 收尾与母版 sink | **进行中**。编码器内存与 64 GB 软上限、取消语义（已定位真实 Ctrl-C 缺陷）、4k/h265/60fps 真实数据 smoke、PNG/EXR 母版 sink |
+| ▶ | **P3** 收尾与母版 sink | **进行中**：✅ 编码器内存与 64 GB 软上限（23.8 GiB，与帧数无关）、✅ 取消语义（进程组 + `Cancelled`）、✅ 4K 母版路径；**剩** h265/60fps smoke、PNG/EXR 母版 sink |
 | | **P4** 画质（母版） | 各向异性滤波、极区多 tile 联合重建、线性光混合 |
 | ◇ | **可选** GPU 加速 | 未决定。warp 1.84 s → 估计 30–40 ms，778 帧从 ~26 min 到 ~3 min；代价 ~1 GB 依赖、仅 NVIDIA |
 | | P5–P7 / 运维 | 交付合规 / GUI / 打包 / 运维 |
@@ -69,7 +69,7 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 | P0 | rig 反解 + 验证工具 | ✅ 已完成（结论写入 AGENTS.md，脚本在 `tools/`） | — |
 | P1 | 单帧正确 + 来源目录抽象 | ✅ **已完成** —— median 0.68，113 个测试全过，无硬编码路径 | — |
 | P2 | 序列吞吐 + 直出 MP4 | ✅ **已完成** —— 8K 2.17 s/帧（21.5×），120 帧实测合规，续跑经测试 | — |
-| P3 | 收尾与母版 sink | 编码器内存 + 64 GB 软上限；取消语义（真实 Ctrl-C 路径）；4k/h265/60fps 真实数据 smoke；PNG 母版 sink | 2–2.5 天 |
+| P3 | 收尾与母版 sink | ✅ 编码器内存 + 64 GB 软上限；✅ 取消语义；4k ✅ / h265 / 60fps 真实数据 smoke；PNG 母版 sink | 2–2.5 天 |
 | **可选** | GPU 加速（CuPy） | warp 1.84 s → 估计 30–40 ms；CPU 路径保留为逐字节基准；不在关键路径上 | 2–3 天，**未决定** |
 | P4 | 画质（母版） | 极区可量化改善；无可见接缝；线性光混合 | 3–5 天 |
 | P5 | 交付合规 | 24 种参数组合全部合规；球面元数据；色彩管线实验有结论 | 3–4 天 |
@@ -193,7 +193,7 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 | | 项 | 状态 |
 |---|---|---|
 | ✅ | 778 帧一次跑完（≤ 45 min、码率 ≤ 上限、产物合规） | **达标**：~26 min，2.10 s/帧（22.3×），全长平均 **196.9 Mbps ≤ 200**，`conformance: OK`，8 个采样帧几何门 PASS。120 帧时的 249.8 Mbps 确为短片段 VBV 超调 |
-| ~~✗~~ | ~~内存峰值 ≤ 8 GB~~ | **判据已作废**（用户 2026-09-08 决定）：不设内存预算，**软上限 64 GB，超出只报 Warning，不报错、不中断**。已实测 x264 `threads=auto` 在 8K 上峰值 14.77 GiB，远在软上限内。剩下的工作（实测整机峰值、验证峰值与帧数无关、加软上限告警）移到 **P3 第 0 项** |
+| ✅ | ~~内存峰值 ≤ 8 GB~~ → 64 GB 软上限 | **判据已作废并在 P3 第 0 项做完**（用户 2026-09-08 决定）：不设内存预算，**软上限 64 GB，超出只报 Warning，不报错、不中断**。整机峰值实测 **23.8 GiB commit**（拼接 3.7 + 编码 20.1），60 帧与 180 帧完全相同 —— 与总帧数无关 |
 | ✅ | 默认输出目录 = 程序所在目录 | `--out` 可省略，落在程序目录，文件名自动生成；测试覆盖 |
 | ✅ | 提交 | `c2c508d`（P2 全部代码与文档） |
 
@@ -280,72 +280,78 @@ python -m vr_compose --source E:/22 sequence --frames 1656-2433 --out L_Cathedra
 下面每张表都是 2026-09-08 在本机实测的，**复现脚本是本阶段的交付物之一**
 （按第 10 节约定，数字落进 AGENTS.md 时必须同时有一条命令能跑出来）。
 
-### 0. 编码器内存与 64 GB 软上限
+### 0. 编码器内存与 64 GB 软上限 ✅
 
-**判据变了**：不再要求 ≤ 8 GB。用户决定 **软上限 64 GB，超出只报 Warning，不报错也不中断**。
+**判据改了**：不再要求 ≤ 8 GB。用户决定 **软上限 64 GB，超出只报 Warning，不报错也不中断**。
 
-8K h264 200 Mbps，走管线真实路径（stdin 喂 rgb24 + `EncodeSpec.video_args()` 原参数）喂 75 帧，
-采样 ffmpeg 进程的 `PeakWorkingSetSize`：
+做完的：
 
-| x264 参数 | 峰值 | 喂入速率 |
-|---|---|---|
-| 默认（`threads=auto` → 本机 48） | **14.77 GiB** | 4.99 fps |
-| `threads=16` | 7.94 GiB | 4.31 fps |
-| `threads=8` | 6.75 GiB | 3.04 fps |
-| `threads=4` | 6.28 GiB | 2.09 fps |
-| `sliced-threads=1:threads=16` | **5.81 GiB** | 4.90 fps |
-| `sliced-threads=1:threads=8` | 5.81 GiB | 3.26 fps |
+- `vr_compose.memory` —— 取进程的 commit 与 resident 高水位，跨 ffmpeg 与自己两侧；
+  `PeakMemory` 报的是两侧峰值之和（真实同时峰值的**上界**，告警宁可偏高）。
+  `vr-compose sequence` 每次跑完打印一行 `memory :`，超限追加一条 `WARNING :`，**继续跑**。
+- `tools/encode_probe.py memory` —— 复现下表；x264 与 x265 都量了。数字见 AGENTS.md 第 5 节。
+- `--encoder-threads N` —— x264 走 `sliced-threads=1:threads=N`，x265 走 `pools=N:frame-threads=2`。
+  **默认不设**，因为 `threads=auto` 既是最快的一档、21 GiB commit 也远在软上限内。
 
-- 吃内存的是**帧级并行** —— 每个 frame thread 要自己持有 8K 的参考帧与半像素插值平面。
-  切成**片级并行**（`sliced-threads=1`）后内存与线程数解耦：8 与 16 线程都是 5.81 GiB。
-- `-filter_threads 1` 实测无效（6.75 → 6.76 GiB）：swscale 不是贡献者，别在这上面花时间。
-- **`sliced-threads` 不能当 `--deterministic` 的廉价替代品** —— 跑两遍比哈希，不一致。已排除。
-- **结论：默认保持 `threads=auto`，不动它。** 14.77 GiB 远在 64 GB 软上限内，而它同时是最快的一档；
-  为了省内存去换 2% 吞吐（4.99 → 4.90 fps）现在没有理由。`sliced-threads` 与线程上限做成
-  `--encoder-threads` 暴露出去，给内存紧的机器留一条路，默认不启用。
+**度量本身是这一项最大的收获**：比较配置必须看 **commit**，不能看 resident ——
+同一条 8K 命令的 resident 实测在 **6.5 / 8.6 / 14.8 GiB** 之间跳（Windows 在缓存压力下修剪工作集），
+拿它比会得出相反结论；commit 稳定，而且它才是「机器会不会 OOM」的那个量。
+（P2 收尾清单里记的「16 GB」就是一次 resident 读数。）
 
-**做什么**
+| 8K h264 | commit | resident | 喂入速率 |
+|---|---|---|---|
+| 默认 `threads=auto`（本机 48） | **21.01 GiB** | 5.99 GiB | 7.32 fps |
+| `threads=16` | 11.11 GiB | 5.63 GiB | 4.92 fps |
+| `sliced-threads=1:threads=16` | **7.93 GiB** | 5.75 GiB | 5.06 fps |
+| x265 默认 `pools=auto` | 8.29 GiB | 7.22 GiB | 4.94 fps |
+| x265 `pools=8:frame-threads=2` | **6.49 GiB** | 5.76 GiB | 2.58 fps |
 
-1. 实测**整机峰值**（ffmpeg + Python 两侧同时采样）。Python 侧目前只有估算 ~2.5–3 GB
-   （843 MiB LUT + 354 MB colour + 118 MB weight + 两帧 tile 332 MB + 每 band gather 临时量约 880 MB）。
-2. 验证**峰值与总帧数无关**（原判据里唯一还有意义的部分）—— 长跑不能是缓慢泄漏。
-3. 加软上限告警：超过 64 GB 打 Warning 继续跑。
-4. `tools/encode_probe.py memory` 子命令复现上表；**x265 的峰值也要量**（第 2 项要真跑 h265，
-   x265 是另一套 `pools` / `frame-threads`）。数字进 AGENTS.md 第 5、8 节。
+吃内存的是**帧级并行**（每个帧线程持有自己的 8K 参考帧与插值平面），x264 的 commit 就是按帧线程数走的；
+切成片级并行后与线程数解耦。管线只需要 0.48 fps，上表最慢的一档也有 4 倍余量。
+`-filter_threads` 实测无效（swscale 不是贡献者）。`sliced-threads` **不能**替代 `--deterministic`
+（跑两遍哈希不一致，已排除）。
 
-### 1. 取消语义 —— 现有测试测不到真实 Ctrl-C 的形状
+**整机峰值与总帧数无关（实测）**：8K h264 跑 60 帧与 180 帧，
+两次都是 **23.8 GiB commit（拼接 3.7 + 编码 20.1）、10.5 GiB resident**，
+**帧数翻 3 倍一位小数都没动**。相对 64 GB 有 2.7 倍余量。
 
-`tests/test_pipeline.py::test_cancel_mid_segment_leaves_no_partial_and_resumes` **已经是绿的**，
-但它是在 progress 回调里抛 Python 异常来模拟取消。真实 Ctrl-C 在 Windows 上发给**整个控制台进程组**，
-分段的 ffmpeg 也会收到，所以真实次序是「ffmpeg 先死，Python 再发现」。把这个形状打在真管线上
-（跑到第 80 帧时 kill 掉当前分段的 ffmpeg）：
+同一个 180 帧作业加 `--encoder-threads 16`：峰值 **9.8 GiB（−59%）**，
+吞吐只掉 **4%**（2.24 → 2.33 s/帧），产物照样 `conformance: OK`。
+所以那个旋钮是真的可用，只是默认不需要。
 
+### 1. 取消语义 ✅
+
+原来的测试是绿的，但它在 progress 回调里抛 Python 异常，测不到真实 Ctrl-C 的形状：
+Windows 的 Ctrl-C 发给控制台里**每一个**进程，ffmpeg 自己处理 SIGINT，所以真实次序是
+**编码器先死**，管线随后撞上断管，报 `ffmpeg exited early`（消息还是空的）——
+**取消与真故障在退出码和消息上完全无法区分**。磁盘状态一直是对的，错的是分类。
+
+做完的三处（细节与实测见 AGENTS.md 第 8 节末）：
+
+1. **ffmpeg 进自己的进程组**（`encode.child_creation_flags()`）—— Ctrl-C 只到 Python。
+2. **`pipeline.Cancelled` + `_CancelScope`** —— SIGINT 变成标志，帧循环在**帧边界**检查，
+   不会有半帧进编码器；取消最多晚一帧生效（8K 约 2 s），再按一次 Ctrl-C 立刻硬中断。
+   GUI（P6）与测试走 `run_sequence(..., cancel=threading.Event())`，不碰信号。
+   CLI 把它映射到退出码 130 —— 注意 `Cancelled` 是 `RuntimeError` 的子类，
+   except 分支的**顺序是有意义的**（低一档就会变成 SystemExit(1)，也就是崩溃），有测试钉住。
+3. **`concat` 清自己的 `.part`** —— 中断落在合并阶段时输出旁边不留残留。
+
+**新写的测试抓到一个真 bug**：Windows 上被 kill 的 ffmpeg，往它 stdin 写数据抛的是
+`OSError: [Errno 22] Invalid argument`，**不是** `BrokenPipeError`。原来只接后者，
+所以真的编码器死亡会以裸 `OSError` 冒出去，CLI 接不住，用户看到 traceback。
+现在接 `OSError` 全族，并把退出码与 stderr 一起放进消息。
+`SegmentWriter` 的 stderr 也改成常驻 drain 线程（原来只在结束时读，
+ffmpeg 输出超过 64 KiB 管道缓冲就会双向死锁）。
+
+**还差**：真实 8K 任务上手动按一次 Ctrl-C。键盘事件没法在非交互会话里合成，这条留给你验收：
+
+```bash
+python -m vr_compose --source E:/22 sequence --frames 1656-1835 --segment-gops 1
 ```
-raised RuntimeError: 'ffmpeg exited early:\n'
-segments: ['out.0000.1-60.mp4']    # 完成的分段保留 ✓
-output exists: False                # 无 .part 残留 ✓
-```
 
-磁盘状态是对的，续跑没问题；**但异常类型错了**。`cli.py` 的 `except KeyboardInterrupt`
-（友好提示 + 退出码 130）不会执行，落到下一条 `except RuntimeError`，用户看到
-`SystemExit("ffmpeg exited early:\n")`、退出码 1、**而且消息是空的**
-（`_stderr()` 在进程被 kill 后读不到东西）。**取消与「编码器真的挂了」目前无法区分。**
-
-**做什么**
-
-1. **ffmpeg 放进自己的进程组**（Windows `CREATE_NEW_PROCESS_GROUP`），让控制台 Ctrl-C 只到 Python，
-   `abort()` 重新成为唯一杀 ffmpeg 的人。已验证该 flag 的效果：新进程组里的子进程对发给它的
-   `CTRL_C_EVENT` 完全无反应。
-   > 说明：非交互会话里无法模拟真键盘 Ctrl-C，所以「今天 ffmpeg 确实会收到」这半边是
-   > Windows 控制台语义 + 上面那个已复现的失败态推出来的，不是直接测到的。
-   > **真实 8K 任务上手动中断一次仍是验收步骤。**
-2. **取消变成一等结果**：装 SIGINT handler 置标志，主动收尾当前分段，抛专用的 `Cancelled`，
-   CLI 映射到 130 那条分支。
-3. **把取消和真故障分开**：取消挂起期间的 broken pipe 报成取消；用 drainer 线程持续抽 ffmpeg 的
-   stderr，消息才不会是空的（顺带消掉一个潜在死锁 —— 现在 stderr 只在最后读，
-   `-loglevel error` 只是让它暂时没发作）。
-4. `concat` 也写 `.part` 再改名，Ctrl-C 落在这里会在**输出旁边**留下 `<out>.mp4.part`，一起收掉。
-5. 新测试用「kill 掉分段的 ffmpeg」这个形状 —— 可自动化，且走的正是真实 Ctrl-C 的代码路径。
+跑起来后按 Ctrl-C，应当看到 `interrupted (cancelled after N of 180 frame(s)); finished
+segments are kept.`、退出码 130、`.segments` 目录里只有完成的整段且没有 `.part`；
+重跑同一条命令只补缺段。
 
 ### 2. 真实数据 smoke（4k / h265 / 60fps）
 

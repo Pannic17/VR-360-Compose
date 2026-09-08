@@ -156,3 +156,32 @@ def test_stitch_at_defaults_to_native() -> None:
     parser = build_parser()
     assert parser.parse_args(["sequence"]).stitch_at == "native"
     assert parser.parse_args(["sequence", "--stitch-at", "delivery"]).stitch_at == "delivery"
+
+
+def test_a_cancelled_run_exits_130_not_as_a_failure(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelled subclasses RuntimeError, so the order of the CLI's except branches is
+    load-bearing: caught one branch lower it would become SystemExit(1), i.e. a crash."""
+    from vr_compose import pipeline
+
+    rig = twenty_file_rig()
+    panorama = analytic_panorama(64, 32)
+    make_source_tree(
+        tmp_path,
+        cameras=20,
+        stem="S",
+        frames=[1, 2],
+        size=(16, 16),
+        tile_for=lambda camera, frame: sample_panorama_into_tile(panorama, rig, camera, 16),
+    )
+
+    def cancel(*_args: object, **_kwargs: object) -> None:
+        raise pipeline.Cancelled("cancelled after 7 of 99 frame(s)")
+
+    monkeypatch.setattr(pipeline, "run_sequence", cancel)
+    code = main(["--source", str(tmp_path), "sequence", "--frames", "1-2", "--no-bar"])
+    assert code == 130
+    err = capsys.readouterr().err
+    assert "interrupted" in err and "resume" in err
+    assert "cancelled after 7 of 99" in err, "say how far it got"

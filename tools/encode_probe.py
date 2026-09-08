@@ -16,6 +16,7 @@ Subcommands:
     python tools/encode_probe.py rate            # PSNR vs the lossless master
     python tools/encode_probe.py chroma          # how much 4:2:0 costs, and why
     python tools/encode_probe.py speed           # encode throughput, full-length estimate
+    python tools/encode_probe.py memory          # encoder peak memory vs thread settings
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import numpy.typing as npt
 from PIL import Image
 
 from vr_compose import encode as vr_encode
+from vr_compose import memory as vr_memory
 
 DEFAULT_ROOT = pathlib.Path("E:/22")
 OUTPUT_SUBDIR = "FinishTaskOutput"
@@ -552,6 +554,104 @@ def cmd_speed(args: argparse.Namespace) -> int:
     return 0
 
 
+# Thread settings worth measuring, per codec. The x264 story is that *frame*-level
+# threading is what costs the memory -- every frame thread holds its own reference and
+# half-pel interpolation planes, which at 8K is hundreds of MB each -- so slice-level
+# threading decouples the peak from the thread count. x265 is a different machine
+# (`pools` for the worker pool, `frame-threads` for frame parallelism), hence its own list.
+MEMORY_VARIANTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "h264": (
+        ("default (threads=auto)", ""),
+        ("threads=16", ":threads=16"),
+        ("threads=8", ":threads=8"),
+        ("threads=4", ":threads=4"),
+        ("sliced-threads=1:threads=16", ":sliced-threads=1:threads=16"),
+        ("sliced-threads=1:threads=8", ":sliced-threads=1:threads=8"),
+    ),
+    "h265": (
+        ("default (pools=auto)", ""),
+        ("pools=16", ":pools=16"),
+        ("pools=8", ":pools=8"),
+        ("frame-threads=2", ":frame-threads=2"),
+        ("pools=8:frame-threads=2", ":pools=8:frame-threads=2"),
+    ),
+}
+
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    """Peak working set of one segment's ffmpeg, on the pipeline's own stdin path.
+
+    Frames are synthetic noise rather than the reference master: an encoder's buffer pool
+    is sized from resolution, threads and lookahead, not from content, so reading 8K PNGs
+    would only make the probe slower. Noise also stops the encoder short-circuiting on
+    flat frames, which would understate the fps column.
+
+    The numbers this prints back the 64 GB soft cap in ROADMAP P3 item 0 and the encoder
+    memory table in AGENTS.md §5.
+    """
+    width, height = SIZES[args.size]
+    print(
+        f"{args.size} {width}x{height}, {args.frames} frames of noise on stdin, "
+        f"the pipeline's own encoder args\n"
+    )
+    rng = np.random.default_rng(7)
+    base = rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+    # a handful of distinct frames, cycled: enough motion to keep the encoder working
+    pool = [np.roll(base, 97 * i, axis=1).tobytes() for i in range(3)]
+
+    for codec in args.codecs:
+        kbps = (args.bitrates or BITRATES_KBPS[args.size])[0]
+        spec = vr_encode.EncodeSpec(width, height, codec, kbps, args.fps, preset=args.preset)
+        print(f"{codec} {kbps // 1000} Mbps, level {spec.level}")
+        print(f"  {'x26x params':<30} {'commit':>10} {'resident':>10} {'fed':>9} {'output':>9}")
+        for label, extra in MEMORY_VARIANTS[codec]:
+            out = args.work / f"memory_{args.size}_{codec}.mp4"
+            video = list(spec.video_args())
+            key = "-x264-params" if codec == "h264" else "-x265-params"
+            video[video.index(key) + 1] += extra
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                *spec.input_args(), *video, "-f", "mp4", str(out),
+            ]  # fmt: skip
+            proc = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
+            assert proc.stdin is not None
+            started = time.time()
+            resident = commit = 0
+            try:
+                for n in range(args.frames):
+                    proc.stdin.write(pool[n % len(pool)])
+                    if n % 10 == 0:  # the pool is allocated up front; sampling is cheap insurance
+                        resident = max(resident, vr_memory.peak_working_set(proc.pid))
+                        commit = max(commit, vr_memory.peak_commit(proc.pid))
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            resident = max(resident, vr_memory.peak_working_set(proc.pid))
+            commit = max(commit, vr_memory.peak_commit(proc.pid))
+            code = proc.wait()
+            assert proc.stderr is not None
+            err = proc.stderr.read().decode(errors="replace").strip()
+            elapsed = time.time() - started
+            if code != 0:
+                print(f"  {label:<30} FAILED: {err[:60]}")
+                continue
+            print(
+                f"  {label:<30} {commit / 2**30:6.2f} GiB {resident / 2**30:7.2f} GiB "
+                f"{args.frames / elapsed:6.2f} fps {out.stat().st_size / 2**20:6.0f} MiB"
+            )
+            out.unlink(missing_ok=True)
+        print()
+    print(
+        "The ffmpeg process only; the stitcher's share is reported by `vr-compose sequence`\n"
+        "itself. Compare settings by commit: resident is a property of the machine as much\n"
+        "as of the process, and threads=auto has measured 6.5-14.8 GiB resident for the\n"
+        "same command. The soft limit is advisory -- see vr_compose.memory."
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     require_ffmpeg()
     parser = argparse.ArgumentParser(
@@ -598,6 +698,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--codecs", nargs="+", default=["h264", "h265"])
     p.add_argument("--total-frames", type=int, default=2433)
     p.set_defaults(func=cmd_speed)
+
+    p = sub.add_parser("memory", help="encoder peak memory and throughput vs thread settings")
+    p.add_argument("--frames", type=int, default=75, help="more than one GOP")
+    p.add_argument("--size", choices=list(SIZES), default="8k")
+    p.add_argument("--codecs", nargs="+", default=["h264", "h265"])
+    p.add_argument("--preset", default="medium")
+    p.set_defaults(func=cmd_memory)
 
     args = parser.parse_args(argv)
     args.work.mkdir(parents=True, exist_ok=True)

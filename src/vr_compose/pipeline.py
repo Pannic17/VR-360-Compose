@@ -25,14 +25,16 @@ import concurrent.futures
 import dataclasses
 import pathlib
 import shutil
+import signal
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 
 import numpy as np
 import numpy.typing as npt
 
-from vr_compose import encode, io, verify
+from vr_compose import encode, io, memory, verify
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
 from vr_compose.warp import DEFAULT_THREADS, WarpPlan
@@ -40,6 +42,7 @@ from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 U8 = npt.NDArray[np.uint8]
 
 __all__ = [
+    "Cancelled",
     "GeometryGateFailed",
     "Progress",
     "SequenceJob",
@@ -54,6 +57,60 @@ PREVIOUS_PIPELINE_SECONDS_PER_FRAME = 46.85
 
 class GeometryGateFailed(RuntimeError):
     """A sampled frame failed metric A. The rig is wrong; stop before wasting hours."""
+
+
+class Cancelled(RuntimeError):
+    """The run was stopped on purpose. Finished segments are kept; re-running resumes.
+
+    A distinct type because the alternative -- inferring cancellation from whatever
+    exception happens to escape -- got it wrong: a console Ctrl-C used to kill ffmpeg
+    first (see :func:`vr_compose.encode.child_creation_flags`) and surfaced as
+    "ffmpeg exited early", i.e. as a failure, with an empty message.
+    """
+
+
+class _CancelScope:
+    """Turns Ctrl-C into a flag the frame loop checks, so no frame is cut in half.
+
+    Only the main thread can carry a signal handler, and only the main thread's handler
+    is ever installed -- a GUI (P6) or a test drives cancellation through the `cancel`
+    event instead, which is the same mechanism without the signal.
+
+    A second Ctrl-C restores the default handler, so an impatient user still gets the
+    immediate KeyboardInterrupt they are asking for.
+    """
+
+    def __init__(self, event: threading.Event) -> None:
+        self.event = event
+        self._restore: object = None
+        """What to put back, and the record that we installed anything at all."""
+
+    def __enter__(self) -> _CancelScope:
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        try:
+            previous = signal.signal(signal.SIGINT, self._handle)
+        except ValueError:  # pragma: no cover -- not the main thread after all
+            return self
+        # `signal.signal` answers None when the handler in place was not set from Python
+        # (an embedded interpreter, a C extension). There is no way to put that one back,
+        # and leaving *ours* installed would silently swallow every later Ctrl-C, so fall
+        # back to the handler CPython itself starts with.
+        self._restore = previous if previous is not None else signal.default_int_handler
+        return self
+
+    def _handle(self, _signum: int, _frame: object) -> None:
+        if self.event.is_set():
+            self._put_back()  # a second Ctrl-C: let the next one interrupt immediately
+        self.event.set()
+
+    def _put_back(self) -> None:
+        if self._restore is not None:
+            signal.signal(signal.SIGINT, self._restore)  # type: ignore[arg-type]
+            self._restore = None
+
+    def __exit__(self, *_exc: object) -> None:
+        self._put_back()
 
 
 def parse_frames(text: str, available: Sequence[int]) -> list[int]:
@@ -108,6 +165,8 @@ class SequenceJob:
     """Run the geometry gate on frames 0, N, 2N, ... of the job."""
     resume: bool = True
     keep_segments: bool = False
+    memory_soft_limit: int = memory.SOFT_LIMIT_BYTES
+    """Advisory. Above this the run warns and carries on -- it never fails or stops."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -205,6 +264,9 @@ class Summary:
     stream: encode.StreamInfo
     problems: tuple[str, ...]
     stages: StageTimes
+    peak: memory.PeakMemory = dataclasses.field(default_factory=memory.PeakMemory)
+    warnings: tuple[str, ...] = ()
+    """Advisory notes. Unlike `problems`, these do not make the run a failure."""
 
     @property
     def seconds_per_frame(self) -> float:
@@ -238,8 +300,15 @@ def run_sequence(
     progress: Callable[[Progress], None] | None = None,
     log: Callable[[str], None] | None = None,
     plan: WarpPlan | None = None,
+    cancel: threading.Event | None = None,
 ) -> Summary:
-    """Encode the whole job to `job.output`. Raises rather than producing a bad file."""
+    """Encode the whole job to `job.output`. Raises rather than producing a bad file.
+
+    Setting `cancel` (or pressing Ctrl-C) stops the run at the next frame boundary with
+    :class:`Cancelled`: the segment in progress is discarded, finished segments are kept,
+    and re-running the same command resumes. Cancellation is checked between frames, so
+    it takes up to one frame -- about 2 s at 8K -- to take effect.
+    """
     say = log or (lambda _: None)
     tools = encode.find_tools()
     tools.require("libx264" if job.spec.codec == "h264" else "libx265")
@@ -268,12 +337,17 @@ def run_sequence(
     reports: list[verify.Agreement] = []
     finished_paths: list[pathlib.Path] = []
     stages = StageTimes()
+    encoder_commit = 0
+    encoder_resident = 0
 
     def decode(frame: int) -> dict[int, U8]:
         return io.load_tiles(job.source, frame, indices, workers=job.decode_workers)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch:
+    stop = cancel if cancel is not None else threading.Event()
+    with _CancelScope(stop), concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch:
         for seg_index, seg_frames in segments:
+            if stop.is_set():
+                raise Cancelled(f"cancelled after {done} of {total} frame(s)")
             path = job.segment_path(seg_index, seg_frames)
             if job.resume and _segment_is_complete(tools, path, len(seg_frames)):
                 skipped += 1
@@ -291,6 +365,8 @@ def run_sequence(
             pending = prefetch.submit(decode, seg_frames[0])
             try:
                 for position, frame in enumerate(seg_frames):
+                    if stop.is_set():
+                        raise Cancelled(f"cancelled after {done} of {total} frame(s)")
                     tick = time.time()
                     tiles = pending.result()
                     if position + 1 < len(seg_frames):
@@ -324,10 +400,18 @@ def run_sequence(
                             Progress(done, total, frame, seg_index, len(segments), rate,
                                      rate * (total - done))
                         )  # fmt: skip
+            except KeyboardInterrupt:
+                # Reachable only if an interrupt slips past the scope's handler -- another
+                # thread, or a second Ctrl-C that restored the default. Same outcome.
+                writer.abort()
+                raise Cancelled(f"cancelled after {done} of {total} frame(s)") from None
             except BaseException:
                 writer.abort()
                 raise
             finished_paths.append(writer.close())
+            # segments run one at a time, so the largest is the job's encoder footprint
+            encoder_commit = max(encoder_commit, writer.peak_commit)
+            encoder_resident = max(encoder_resident, writer.peak_resident)
             say(f"segment {seg_index + 1}/{len(segments)} closed -- {stages.report()}")
 
     say(f"joining {len(finished_paths)} segment(s) ...")
@@ -338,6 +422,18 @@ def run_sequence(
         problems.append(f"joined file has {stream.frames} frames, expected {total}")
     if not job.keep_segments and not problems:
         shutil.rmtree(job.segment_dir, ignore_errors=True)
+    peak = memory.PeakMemory(
+        stitcher=memory.peak_commit(),
+        encoder=encoder_commit,
+        stitcher_resident=memory.peak_working_set(),
+        encoder_resident=encoder_resident,
+    )
+    warnings: list[str] = []
+    if peak.measured:
+        say(peak.report())
+        if peak.exceeds(job.memory_soft_limit):
+            warnings.append(peak.warning(job.memory_soft_limit))
+            say(f"WARNING: {warnings[-1]}")
     return Summary(
         output=job.output,
         frames=total,
@@ -349,6 +445,8 @@ def run_sequence(
         stream=stream,
         problems=tuple(problems),
         stages=stages,
+        peak=peak,
+        warnings=tuple(warnings),
     )
 
 

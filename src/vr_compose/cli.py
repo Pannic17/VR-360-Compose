@@ -180,6 +180,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             args.fps,
             preset=args.preset,
             deterministic=args.deterministic,
+            encoder_threads=args.encoder_threads,
             master=_master_size(chosen, rig, args.size, args.stitch_at),
         )
         job = pipeline.SequenceJob(
@@ -241,9 +242,12 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
         ) from None
-    except KeyboardInterrupt:
+    # Cancelled is a RuntimeError, so it has to be caught before the failure branch below.
+    except (pipeline.Cancelled, KeyboardInterrupt) as exc:
+        detail = f" ({exc})" if isinstance(exc, pipeline.Cancelled) else ""
         print(
-            "\ninterrupted; finished segments are kept. Re-run the same command to resume.",
+            f"\ninterrupted{detail}; finished segments are kept. "
+            "Re-run the same command to resume.",
             file=sys.stderr,
         )
         return 130
@@ -262,6 +266,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         )
     if summary.encoded:
         print(f"stages     : {summary.stages.report()}")
+    if summary.peak.measured:
+        print(f"memory     : {summary.peak.report()}")
     if summary.skipped_segments:
         print(f"resumed    : {summary.skipped_segments} segment(s) were already complete")
     gates = summary.gate_reports
@@ -274,6 +280,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         f"{stream.width}x{stream.height} {stream.pix_fmt} B={stream.b_frames} "
         f"I-gap={list(stream.i_intervals)} {stream.bitrate_mbps:.1f} Mbps"
     )
+    for warning in summary.warnings:
+        print(f"WARNING    : {warning}", file=sys.stderr)
     if summary.problems:
         print("CONFORMANCE PROBLEMS:")
         for problem in summary.problems:
@@ -356,6 +364,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="threads decoding the next frame; more than 4 slows the warp (GIL contention)",
     )
     sequence.add_argument("--warp-threads", type=int, default=DEFAULT_THREADS)
+    sequence.add_argument(
+        "--encoder-threads",
+        type=int,
+        default=None,
+        help="cap the encoder's threads to lower its memory; unset (default) is fastest "
+        "and commits about 21 GiB at 8K, 16 commits about 8 GiB. Footprint only -- it "
+        "does not make the output reproducible",
+    )
     sequence.add_argument("--stats-every", type=int, default=100, help="geometry gate cadence")
     sequence.add_argument("--no-bar", action="store_true", help="plain log lines, no tqdm bar")
     sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
