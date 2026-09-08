@@ -833,8 +833,11 @@ PDF 由 `tools/manual_pdf.py` 在构建时现排（Edge/Chrome 无头打印）�
 **做什么**
 
 1. **onedir 分发** ✅（探针 158 MB / 热启动 0.86 s；**本项目实测 167.5 MiB，
-   `--version` 热启动 0.37–0.57 s**）。不要用 onefile ——
-   省 94 MB 下载量换来每次启动多 5 秒。
+   `--version` 热启动 0.35–0.39 s**）。不要用 onefile ——
+   本项目的 onefile 版也真打出来量过了（AGENTS.md 第 7 节）：**压缩后只小 0.9 MiB**
+   （67.2 → 66.3 MiB，因为分发本来就打 zip），而每次启动要 3.6–6.7 s 而不是 0.35 s，
+   还要往 `%TEMP%` 解 124 MiB、并且不保证清理。
+   要「一个文件」就把 `dist/VR-Compose/` 压成 zip：**212 MiB**，一个文件，零代价。
 2. ~~`freeze_support()`~~ 已在 `main_ui.py` 里做完，见上。
 3. **不要写 Qt 模块排除列表** —— 实测加 47 条 `--exclude-module` 体积一点没变，
    PyInstaller 的 PySide6 hook 已经只打包用到的模块。省下这份工。
