@@ -14,6 +14,7 @@
 | `fit_rig.py` | §3 装配反解；**也是遇到未登记布局时的求解工具** | 每相机约 30 s |
 | `coverage_map.py` | §3 球面覆盖与采样密度 | 数秒 |
 | `resample_probe.py` | §3「重采样到底在做什么」—— 映射的雅可比，决定 P4 的滤波器 | 数秒 |
+| `linear_light_probe.py` | §8「线性光混合」—— 分别量混合与插值改到线性光的效果 | 约 1 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池 | 每种配置约 90 s 构建 |
 
@@ -35,8 +36,10 @@
 ```
 
 ```bash
-.\.venv\Scripts\python.exe toolsesample_probe.py
-.\.venv\Scripts\python.exe toolsesample_probe.py --tile 3840 --output-width 7680
+.\.venv\Scripts\python.exe tools
+esample_probe.py
+.\.venv\Scripts\python.exe tools
+esample_probe.py --tile 3840 --output-width 7680
 ```
 
 `resample_probe.py` 是 P4 加的，回答的是 `coverage_map.py` 回答不了的那个问题：
