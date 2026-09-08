@@ -461,6 +461,7 @@ h265 那组走默认模式：`--deterministic` 慢 7.7×，不适合当 smoke。
 | ✅ | PNG 母版 sink：像素与 `frame` 恒等、同 compress_level 下字节恒等、按文件续跑、空间不足拒绝启动 | 全部有测试；8K 实测 2.40 s/帧 |
 | ✅ | `ruff check` + `ruff format --check` + `mypy --strict` + `pytest` 全绿 | 228 个测试 |
 | ▶ | **真实 8K 任务上手动 Ctrl-C 一次** | **留给用户验收** —— 键盘事件没法在非交互会话里合成，命令见第 1 项末 |
+
 ---
 
 ## P4 — 画质（母版层）
