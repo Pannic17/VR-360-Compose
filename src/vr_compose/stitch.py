@@ -33,8 +33,11 @@ F32 = npt.NDArray[np.float32]
 I32 = npt.NDArray[np.int32]
 F64 = npt.NDArray[np.float64]
 U8 = npt.NDArray[np.uint8]
+Panorama = npt.NDArray[np.uint8] | npt.NDArray[np.uint16]
 
 __all__ = [
+    "BIT_DEPTHS",
+    "DEFAULT_FEATHER_POWER",
     "DEFAULT_SAMPLER",
     "SAMPLERS",
     "BandStats",
@@ -69,7 +72,35 @@ default because the master is what P4 is for; `--sampler bilinear` is there when
 throughput matters more.
 """
 
+BIT_DEPTHS = (8, 16)
+"""Output depth. 8 is delivery; 16 is a master, and only a master (P4 item 6).
+
+The source is 8-bit, so 16 bits carry no extra information *from the render* -- what they
+keep is the sub-level precision the resample and the blend produce, which 8-bit
+quantisation throws away. That matters for a master a later stage will resample again,
+and it is what makes an eventual 16-bit or EXR source a drop-in rather than a rewrite.
+
+The scale factor is 257, not 256: it maps 255 exactly onto 65535, so every 8-bit level
+lands on an exact multiple and an 8-bit and a 16-bit master of the same frame agree
+wherever the blend happened to be integral.
+"""
+
+SIXTEEN_BIT_SCALE = np.float32(257.0)
+
 LUMA_BT709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def quantise(blended: F32, bit_depth: int) -> Panorama:
+    """Round a blended float32 panorama to the output depth.
+
+    Round, do not truncate. `astype()` truncates toward zero, so a uniform input whose
+    weighted average lands at 29.9999 would come out as 29 -- visible as banding on flat
+    areas, and it doubles the average quantisation error.
+    """
+    if bit_depth == 8:
+        return np.asarray(np.rint(np.clip(blended, 0.0, 255.0)), dtype=np.uint8)
+    scaled = blended * SIXTEEN_BIT_SCALE
+    return np.asarray(np.rint(np.clip(scaled, 0.0, 65535.0)), dtype=np.uint16)
 
 
 def luma_bt709(rgb: F32) -> F32:
@@ -130,7 +161,7 @@ class BandStats:
 class StitchResult:
     """A finished panorama and the statistics gathered while producing it."""
 
-    image: U8
+    image: Panorama
     stats: BandStats
 
     @property
@@ -205,16 +236,38 @@ def bilinear_blend(taps: tuple[F32, F32, F32, F32], fx: F32, fy: F32) -> F32:
     return np.asarray(top * (one - wy) + bottom * wy, dtype=np.float32)
 
 
-def _feather(x: F64, y: F64, half: float) -> F32:
+DEFAULT_FEATHER_POWER = 2.0
+"""Exponent on a tile's distance-to-edge when weighting the blend.
+
+ROADMAP P4 item 4 asked for the feather *width* to be parameterised. The exponent is the
+more useful knob, and the reason is geometric: distance-to-edge doubles as a proxy for
+sampling quality, because a tile magnifies least near its own centre
+(`tools/resample_probe.py`). A power of it therefore **prefers the tile that sees a
+direction most centrally**, which a width -- flat interior, ramp near the border -- would
+discard by making every interior weight equal.
+
+The exponent also spans exactly the family P4 item 2 needs to ask about: as it rises the
+blend slides from "average everything that can see this direction" toward "take the best
+tile and ignore the rest", so sweeping it measures whether averaging misaligned tiles
+costs detail. ROADMAP P4 records what the sweep found.
+"""
+
+
+def _feather(x: F64, y: F64, half: float, power: float = DEFAULT_FEATHER_POWER) -> F32:
     """Blend weight falling to zero at the tile border.
 
-    Squared distance-to-edge in normalised tile coordinates: smooth enough that no seam is
-    visible, cheap enough to recompute per frame, and it keeps the weight strictly
-    positive inside so a direction covered by a single tile still resolves.
+    Distance-to-edge in normalised tile coordinates raised to `power`: smooth enough that
+    no seam is visible, cheap enough to recompute per frame, and it keeps the weight
+    strictly positive inside so a direction covered by a single tile still resolves.
+
+    The default is spelled as a squaring rather than a `pow`, so it stays bit-for-bit
+    what P1 through P3 produced.
     """
     dx = 1.0 - np.abs(x) / half
     dy = 1.0 - np.abs(y) / half
-    return np.asarray(np.minimum(dx, dy) ** 2, dtype=np.float32) + _EPSILON
+    edge = np.minimum(dx, dy)
+    raised = edge**2 if power == DEFAULT_FEATHER_POWER else edge**power
+    return np.asarray(raised, dtype=np.float32) + _EPSILON
 
 
 def stitch_bands(
@@ -225,6 +278,8 @@ def stitch_bands(
     *,
     band_rows: int = DEFAULT_BAND_ROWS,
     sampler: str = DEFAULT_SAMPLER,
+    feather_power: float = DEFAULT_FEATHER_POWER,
+    bit_depth: int = 8,
 ) -> StitchResult:
     """Blend `tiles` into a ``height x width x 3`` panorama, one horizontal band at a time.
 
@@ -236,6 +291,10 @@ def stitch_bands(
         raise ValueError(f"equirect output must be 2:1, got {width}x{height}")
     if sampler not in SAMPLERS:
         raise ValueError(f"sampler must be one of {SAMPLERS}, got {sampler!r}")
+    if not 0.0 < feather_power <= 32.0:
+        raise ValueError(f"feather_power must be in (0, 32], got {feather_power}")
+    if bit_depth not in BIT_DEPTHS:
+        raise ValueError(f"bit_depth must be one of {BIT_DEPTHS}, got {bit_depth}")
     views = rig.unique_views
     missing = sorted(set(views) - set(tiles))
     if missing:
@@ -251,7 +310,7 @@ def stitch_bands(
             raise ValueError(f"camera {index}: expected a square RGB tile, got {tile.shape}")
 
     half = projection.half_extent(rig.fov_deg)
-    image = np.empty((height, width, 3), np.uint8)
+    image: Panorama = np.empty((height, width, 3), np.uint8 if bit_depth == 8 else np.uint16)
     stats = BandStats.zeros(0)
 
     for start in range(0, height, max(1, band_rows)):
@@ -306,7 +365,7 @@ def stitch_bands(
                 sampled = cubic_blend(
                     (tap_row(0), tap_row(1), tap_row(2), tap_row(3)), fx, fy
                 )  # fmt: skip
-            w = _feather(x[visible], y[visible], half)
+            w = _feather(x[visible], y[visible], half, feather_power)
             colour[visible] += sampled * w[:, None]
             weight[visible] += w
             luma = luma_bt709(sampled)
@@ -314,12 +373,8 @@ def stitch_bands(
             band.luma_sum[visible] += luma
             band.luma_sq_sum[visible] += luma.astype(np.float64) ** 2
 
-        blended = colour / np.maximum(weight, _EPSILON)[:, None]
-        # Round, do not truncate. astype() truncates toward zero, so a uniform input
-        # whose weighted average lands at 29.9999 would come out as 29 -- visible as
-        # banding on flat areas, and it doubles the average quantisation error.
-        quantised = np.rint(np.clip(blended, 0.0, 255.0)).astype(np.uint8)
-        image[start:stop] = quantised.reshape(stop - start, width, 3)
+        blended = np.asarray(colour / np.maximum(weight, _EPSILON)[:, None], dtype=np.float32)
+        image[start:stop] = quantise(blended, bit_depth).reshape(stop - start, width, 3)
         stats = band if stats.count.size == 0 else stats.extend(band)
 
     return StitchResult(image=image, stats=stats)
@@ -332,8 +387,19 @@ def stitch_frame(
     *,
     band_rows: int = DEFAULT_BAND_ROWS,
     sampler: str = DEFAULT_SAMPLER,
+    feather_power: float = DEFAULT_FEATHER_POWER,
+    bit_depth: int = 8,
 ) -> StitchResult:
     """:func:`stitch_bands` with the 2:1 height implied by `width`."""
     if width % 2:
         raise ValueError(f"equirect width must be even, got {width}")
-    return stitch_bands(tiles, rig, width, width // 2, band_rows=band_rows, sampler=sampler)
+    return stitch_bands(
+        tiles,
+        rig,
+        width,
+        width // 2,
+        band_rows=band_rows,
+        sampler=sampler,
+        feather_power=feather_power,
+        bit_depth=bit_depth,
+    )

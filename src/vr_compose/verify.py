@@ -17,6 +17,7 @@ has to pass for the cheap preview sampler too.
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -119,13 +120,14 @@ def agreement(stats: BandStats) -> Agreement:
     )
 
 
-def wrap_seam_error(image: npt.NDArray[np.uint8]) -> float:
+def wrap_seam_error(image: npt.NDArray[np.unsignedinteger[Any]]) -> float:
     """Mean absolute difference between the first and last columns.
 
     An equirect wraps at 360 degrees, so those columns are adjacent on the sphere. The
     reference output measures 1.15/255 here; a large value means the longitude mapping is
     off by a pixel or the panorama is not actually full-circle.
     """
-    left = image[:, 0].astype(np.int16)
-    right = image[:, -1].astype(np.int16)
+    # int32, not int16: a 16-bit master's samples reach 65535 and would overflow.
+    left = image[:, 0].astype(np.int32)
+    right = image[:, -1].astype(np.int32)
     return float(np.abs(left - right).mean())

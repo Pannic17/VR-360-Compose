@@ -38,15 +38,19 @@ from vr_compose import projection
 from vr_compose.rig import Rig
 from vr_compose.stitch import (
     _EPSILON,
+    BIT_DEPTHS,
     DEFAULT_BAND_ROWS,
+    DEFAULT_FEATHER_POWER,
     DEFAULT_SAMPLER,
     SAMPLERS,
     BandStats,
+    Panorama,
     StitchResult,
     _feather,
     bilinear_blend,
     cubic_blend,
     luma_bt709,
+    quantise,
 )
 
 F32 = npt.NDArray[np.float32]
@@ -66,7 +70,12 @@ contends for the GIL, 8 threads beat 4 (2.2 s vs 2.8 s with 8 decode workers; 1.
 
 
 def plan_fingerprint(
-    rig: Rig, width: int, height: int, tile_size: int, sampler: str = DEFAULT_SAMPLER
+    rig: Rig,
+    width: int,
+    height: int,
+    tile_size: int,
+    sampler: str = DEFAULT_SAMPLER,
+    feather_power: float = DEFAULT_FEATHER_POWER,
 ) -> str:
     """Identifies everything the plan depends on. Same fingerprint, same numbers."""
     payload = {
@@ -79,6 +88,7 @@ def plan_fingerprint(
         "height": height,
         "tile": tile_size,
         "sampler": sampler,
+        "feather": feather_power,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return digest[:16]
@@ -114,6 +124,7 @@ class WarpPlan:
     tiles: tuple[TileContributors, ...]
     build_seconds: float
     sampler: str = DEFAULT_SAMPLER
+    feather_power: float = DEFAULT_FEATHER_POWER
 
     @property
     def entries(self) -> int:
@@ -136,6 +147,7 @@ class WarpPlan:
         *,
         band_rows: int = DEFAULT_BAND_ROWS,
         sampler: str = DEFAULT_SAMPLER,
+        feather_power: float = DEFAULT_FEATHER_POWER,
     ) -> WarpPlan:
         """Evaluate the geometry once. Mirrors :func:`stitch_bands` step for step."""
         if width != 2 * height:
@@ -178,7 +190,13 @@ class WarpPlan:
                     np.int32
                 )
                 chunks[index].append(
-                    (out_index, src_index, _feather(x[visible], y[visible], half), fx, fy)
+                    (
+                        out_index,
+                        src_index,
+                        _feather(x[visible], y[visible], half, feather_power),
+                        fx,
+                        fy,
+                    )
                 )
 
         def joined(parts: list[tuple[I32, I32, F32, F32, F32]], column: int, dtype: type) -> object:
@@ -201,10 +219,11 @@ class WarpPlan:
             width=width,
             height=height,
             tile_size=tile_size,
-            fingerprint=plan_fingerprint(rig, width, height, tile_size, sampler),
+            fingerprint=plan_fingerprint(rig, width, height, tile_size, sampler, feather_power),
             tiles=tiles,
             build_seconds=time.time() - started,
             sampler=sampler,
+            feather_power=feather_power,
         )
 
     def _validate(self, tiles: dict[int, U8]) -> None:
@@ -225,6 +244,7 @@ class WarpPlan:
         *,
         with_stats: bool = False,
         threads: int = DEFAULT_THREADS,
+        bit_depth: int = 8,
     ) -> StitchResult:
         """Blend one frame's tiles. Same arithmetic as :func:`stitch_bands`.
 
@@ -239,11 +259,13 @@ class WarpPlan:
         for it on every frame.
         """
         self._validate(tiles)
+        if bit_depth not in BIT_DEPTHS:
+            raise ValueError(f"bit_depth must be one of {BIT_DEPTHS}, got {bit_depth}")
         pixels = self.width * self.height
         colour = np.zeros((pixels, 3), np.float32)
         weight = np.zeros(pixels, np.float32)
         stats = BandStats.zeros(pixels if with_stats else 0)
-        image = np.empty((pixels, 3), np.uint8)
+        image: Panorama = np.empty((pixels, 3), np.uint8 if bit_depth == 8 else np.uint16)
         bands = max(1, min(int(threads), pixels))
         edges = np.linspace(0, pixels, bands + 1).astype(np.int64)
         flat = {tile.camera: tiles[tile.camera].reshape(-1, 3) for tile in self.tiles}
@@ -305,8 +327,10 @@ class WarpPlan:
                     stats.count[out_index] += 1.0
                     stats.luma_sum[out_index] += luma
                     stats.luma_sq_sum[out_index] += luma.astype(np.float64) ** 2
-            blended = colour[lo:hi] / np.maximum(weight[lo:hi], _EPSILON)[:, None]
-            image[lo:hi] = np.rint(np.clip(blended, 0.0, 255.0)).astype(np.uint8)
+            blended = np.asarray(
+                colour[lo:hi] / np.maximum(weight[lo:hi], _EPSILON)[:, None], dtype=np.float32
+            )
+            image[lo:hi] = quantise(blended, bit_depth)
 
         if bands == 1:
             band(0)
@@ -334,6 +358,7 @@ class WarpPlan:
             "cameras": [t.camera for t in self.tiles],
             "build_seconds": self.build_seconds,
             "sampler": self.sampler,
+            "feather_power": self.feather_power,
         }
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode(), np.uint8)
         # numpy's stub types **kwds against `allow_pickle: bool`; the arrays are fine.
@@ -371,4 +396,5 @@ class WarpPlan:
             tiles=tiles,
             build_seconds=float(meta["build_seconds"]),
             sampler=str(meta["sampler"]),
+            feather_power=float(meta["feather_power"]),
         )

@@ -18,7 +18,14 @@ from tqdm import tqdm
 from vr_compose import __version__, encode, io, pipeline, verify
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
-from vr_compose.stitch import DEFAULT_BAND_ROWS, DEFAULT_SAMPLER, SAMPLERS, stitch_frame
+from vr_compose.stitch import (
+    BIT_DEPTHS,
+    DEFAULT_BAND_ROWS,
+    DEFAULT_FEATHER_POWER,
+    DEFAULT_SAMPLER,
+    SAMPLERS,
+    stitch_frame,
+)
 from vr_compose.warp import DEFAULT_THREADS
 
 
@@ -147,7 +154,15 @@ def cmd_frame(args: argparse.Namespace) -> int:
     tiles = io.load_tiles(chosen, frame, indices, workers=args.decode_workers)
     decoded = time.time() - started
 
-    result = stitch_frame(tiles, rig, width, band_rows=args.band_rows, sampler=args.sampler)
+    result = stitch_frame(
+        tiles,
+        rig,
+        width,
+        band_rows=args.band_rows,
+        sampler=args.sampler,
+        feather_power=args.feather_power,
+        bit_depth=args.bit_depth,
+    )
     elapsed = time.time() - started
     print(
         f"stitched   : frame {frame} at {width}x{width // 2} in {elapsed:.1f} s "
@@ -159,7 +174,7 @@ def cmd_frame(args: argparse.Namespace) -> int:
     print(report.report(args.sampler))
 
     if args.out is not None:
-        size = io.write_png(args.out, result.image, compress_level=args.compress_level)
+        size = io.write_png_atomically(args.out, result.image, compress_level=args.compress_level)
         print(f"wrote      : {args.out}  ({size / 2**20:.1f} MiB)")
     return 0 if report.passed else 1
 
@@ -177,7 +192,7 @@ DELIVERY_ONLY = (
 )
 """`sequence` options that only mean something when an encoder is involved."""
 
-MASTER_ONLY = ("compress_level", "write_workers")
+MASTER_ONLY = ("compress_level", "write_workers", "bit_depth")
 """...and the ones that only mean something when PNG files are."""
 
 
@@ -224,6 +239,8 @@ def cmd_master(
             decode_workers=args.decode_workers,
             warp_threads=args.warp_threads,
             sampler=args.sampler,
+            feather_power=args.feather_power,
+            bit_depth=args.bit_depth,
             write_workers=args.write_workers,
             stats_every=args.stats_every,
             resume=not args.no_resume,
@@ -236,8 +253,8 @@ def cmd_master(
     print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
     print(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
     print(
-        f"master     : {width}x{width // 2} PNG, compress_level {job.compress_level}, "
-        f"sampler {job.sampler}"
+        f"master     : {width}x{width // 2} {job.bit_depth}-bit PNG, "
+        f"compress_level {job.compress_level}, sampler {job.sampler}"
     )
     print(f"output     : {job.directory}")
 
@@ -343,6 +360,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             decode_workers=args.decode_workers,
             warp_threads=args.warp_threads,
             sampler=args.sampler,
+            feather_power=args.feather_power,
             stats_every=args.stats_every,
             resume=not args.no_resume,
             keep_segments=args.keep_segments,
@@ -472,6 +490,12 @@ def build_parser() -> argparse.ArgumentParser:
     frame.add_argument("--band-rows", type=int, default=DEFAULT_BAND_ROWS)
     frame.add_argument("--decode-workers", type=int, default=8)
     frame.add_argument(
+        "--bit-depth", type=int, default=8, choices=list(BIT_DEPTHS), help="output PNG depth"
+    )
+    frame.add_argument(
+        "--feather-power", type=float, default=DEFAULT_FEATHER_POWER, help="blend exponent"
+    )
+    frame.add_argument(
         "--sampler",
         choices=list(SAMPLERS),
         default=DEFAULT_SAMPLER,
@@ -529,6 +553,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence.add_argument("--warp-threads", type=int, default=DEFAULT_THREADS)
     sequence.add_argument(
+        "--feather-power",
+        type=float,
+        default=DEFAULT_FEATHER_POWER,
+        help="exponent on a tile's distance-to-edge when blending; higher prefers the "
+        "tile that sees a direction most centrally. Measured optimum is 2-4",
+    )
+    sequence.add_argument(
         "--sampler",
         choices=list(SAMPLERS),
         default=DEFAULT_SAMPLER,
@@ -554,6 +585,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=range(10),
         help="PNG master zlib level; 1 costs 0.68 s a frame against 6's 2.77 s for ~10%% "
         "more bytes. The pixels are identical either way (--out-format png only)",
+    )
+    sequence.add_argument(
+        "--bit-depth",
+        type=int,
+        default=8,
+        choices=list(BIT_DEPTHS),
+        help="PNG master depth; 16 keeps the resample's sub-level precision, which 8-bit "
+        "quantisation throws away (--out-format png only)",
     )
     sequence.add_argument(
         "--write-workers",

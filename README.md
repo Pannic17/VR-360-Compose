@@ -5,8 +5,8 @@
 
 仓库：<https://github.com/Pannic17/VR-360-Compose>
 
-**进度**：P0（rig 反解）、P1（单帧正确）、P2（序列吞吐 + 直出 MP4）、P3（收尾与母版 sink）已完成，
-8K 实测 **2.0 s/帧**（上一代 46.85 s）。下一步 P4：画质（各向异性滤波、极区重建、线性光混合）。
+**进度**：P0–P4 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质）。
+下一步 P5：输出命名与单帧模式。
 阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)。
 
 ---
@@ -102,6 +102,8 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--stem` | | 目录里有多个文件 stem 时选择要处理的集合 |
 | `--out-format` | `mp4` | `mp4` 交付；`png` 出无损母版序列（按源的原生密度，一帧一个文件）；`exr` 预留未实现 |
 | `--sampler` | `catmullrom` | 分数位置怎么读 tile：`catmullrom` 最还原（对源 +1.24 dB），`bilinear` 快 2.8 倍但更软，`nearest` 是 P1 基准/预览档 |
+| `--feather-power` | `2` | 混合时对「距 tile 边缘」的指数；越高越只信最中央看到这个方向的那个 tile。实测最优 2–4 |
+| `--bit-depth` | `8` | 母版位深（仅 `--out-format png`）。`16` 保住重采样的亚灰阶精度，代价是 133 MiB/帧（8 位 39 MiB） |
 | `--stitch-at` | `native` | `native` 按源的原生密度拼母版（本 rig = 4× tile），再由编码器 Lanczos 降到交付尺寸；`delivery` 直接拼到交付尺寸 —— 快，但会走样，**只用于预览**（见下） |
 | `--deterministic` | 关 | 续跑结果逐字节一致；编码器慢 6–8 倍，一般不用（见下） |
 | `--segment-gops` | `5` | 每个可续跑分段含几个 GOP（5 × 2 s = 10 s） |
@@ -163,6 +165,15 @@ level 由规范表算出最小合规值，不交给编码器（编码器自选�
   H.264/HEVC 都没有等级容得下 15360×7680。
 - `--stitch-at delivery` 是直接拼交付尺寸的快速预览档，**不要用它出片**。
 
+## 母版位深与磁盘
+
+`--out-format png` 默认出 8-bit（8K 约 **39 MiB/帧**，778 帧约 30 GiB）。
+加 `--bit-depth 16` 出 16-bit（约 **133 MiB/帧**，778 帧约 **101 GiB**）——
+源是 8-bit，所以 16 位不带来渲染器的新信息，它保住的是**重采样与混合产生的亚灰阶精度**，
+对「还要被下游再重采样一次」的母版有意义。程序启动前按位深预检磁盘空间，不够会拒绝开始。
+
+（Pillow 写不了 16-bit RGB PNG，所以这条路径由 `io.write_png16` 自己写 PNG，用 Up 滤波。）
+
 ## 采样器（`--sampler`）
 
 tile 到全景的映射几乎处处在**放大**（次轴缩放比 0.82 赤道 / 0.06 极冠），所以关键不是抗锯齿
@@ -181,7 +192,7 @@ catmullrom 在它上面比 bilinear 差，却对源还原好 1.24 dB。细节见
 
 | | |
 |---|---|
-| 8K 单帧（`catmullrom`） | ~10.1 s（默认，最还原） |
+| 8K 单帧（`catmullrom`） | ~10.1 s（默认，最还原）；16-bit 母版 ~13.1 s |
 | 8K 单帧（`bilinear` / `nearest`） | ~3.6 s / ~2.0 s |
 | 778 帧 8K | `catmullrom` 约 2.2 小时 / `bilinear` 约 53 分钟 / `nearest` 约 32 分钟 |
 | 4K 单帧 | 与 8K 同价（按 8K 母版拼，再降采样）；`--stitch-at delivery` 更快，但会走样 |
@@ -218,7 +229,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 228 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 249 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools

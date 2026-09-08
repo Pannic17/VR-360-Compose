@@ -17,6 +17,8 @@
 | `linear_light_probe.py` | §8「线性光混合」—— 分别量混合与插值改到线性光的效果 | 约 1 分钟 |
 | `detail_probe.py` | §8/§9「极区细节保留度」—— 源 tile 与母版按纬度的局部对比度 | 约 1 分钟 |
 | `fidelity_probe.py` | §8「三个采样器」—— 母版往返回 tile 的还原 PSNR，**这才是保真度指标** | 约 2 分钟 |
+| `seam_probe.py` | §8「接缝、羽化指数」—— 20 点接缝梯度不连续性 + 羽化扫描 | 约 2 分钟 |
+| `temporal_probe.py` | §8「时域稳定性」—— 连续 10 帧的方差与与网格无关的跳变界 | 约 4 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池 | 每种配置约 90 s 构建 |
 
@@ -93,6 +95,9 @@ median 0.68   mean 1.02   p95 3.10   std>8 = 0.25%
 两轴同时缩小的方向占 0.1%；`--tile 3840 --output-width 7680` 则是 100% 在缩小。
 跑 `fidelity_probe.py` 应当得到还原 PSNR nearest 47.85 / bilinear 47.66 / catmullrom 48.90 dB
 —— **注意它和指标 A 的排序相反**，指标 A 量一致性、这个量保真度，别混用。
+跑 `seam_probe.py` 应当得到接缝比 median 约 0.79（<1 就是没有接缝），且各羽化指数下 p95/max 相同。
+跑 `temporal_probe.py` 应当得到 nearest 四个纬度带的跳变界全部 PASS（凸核必然如此），
+catmullrom 在赤道超出约 1.1%；极冠的方差比值 >1 是网格差异，不是抖动（见 §8）。
 跑 `encode_probe.py matrix` 应当 12 种组合全部 `OK`，且等级为
 8k H.264 6.0 / 8k H.265 6.2(6.1@100k) / 4k H.264 5.1 / 4k H.265 Main tier 5.2(5.1@28k)。
 等级与档位从 `vr_compose.encode` 导入，工具里没有第二份表。

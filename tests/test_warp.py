@@ -185,3 +185,49 @@ def test_extra_tiles_are_ignored(rig: Rig, tiles: dict[int, U8], plan: WarpPlan)
     for index in rig.duplicate_indices:
         everything[index] = np.zeros((TILE, TILE, 3), np.uint8)
     assert np.array_equal(plan.apply(everything).image, plan.apply(tiles).image)
+
+
+@pytest.mark.parametrize("sampler", list(SAMPLERS))
+def test_sixteen_bit_matches_the_stitch_and_the_eight_bit_output(
+    rig: Rig, tiles: dict[int, U8], sampler: str
+) -> None:
+    """Metric D at 16 bits, plus the 257 scaling holding against the 8-bit result."""
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, sampler=sampler)
+    deep = plan.apply(tiles, bit_depth=16).image
+    assert deep.dtype == np.uint16
+    assert np.array_equal(
+        deep, stitch_frame(tiles, rig, WIDTH, sampler=sampler, bit_depth=16).image
+    )
+
+    shallow = plan.apply(tiles, bit_depth=8).image
+    # 16-bit is the same blend, scaled by 257 and rounded once instead of twice
+    assert np.abs(deep.astype(np.int64) // 257 - shallow.astype(np.int64)).max() <= 1
+
+
+def test_the_feather_power_default_is_byte_identical(rig: Rig, tiles: dict[int, U8]) -> None:
+    """The exponent is new; its default must not have moved a single pixel."""
+    explicit = stitch_frame(tiles, rig, WIDTH, feather_power=2.0).image
+    implied = stitch_frame(tiles, rig, WIDTH).image
+    assert np.array_equal(explicit, implied)
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, feather_power=2.0)
+    assert np.array_equal(plan.apply(tiles).image, implied)
+
+
+@pytest.mark.parametrize("power", [0.5, 1.0, 4.0, 8.0])
+def test_the_feather_power_reaches_the_plan(rig: Rig, tiles: dict[int, U8], power: float) -> None:
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, feather_power=power)
+    expected = stitch_frame(tiles, rig, WIDTH, feather_power=power).image
+    assert np.array_equal(plan.apply(tiles).image, expected), "metric D, per feather"
+    assert plan.feather_power == power
+    assert plan.fingerprint != WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE).fingerprint
+
+
+def test_a_bad_feather_or_depth_is_refused(rig: Rig, tiles: dict[int, U8]) -> None:
+    for bad in (0.0, -1.0, 64.0):
+        with pytest.raises(ValueError, match="feather_power"):
+            stitch_frame(tiles, rig, WIDTH, feather_power=bad)
+    with pytest.raises(ValueError, match="bit_depth"):
+        stitch_frame(tiles, rig, WIDTH, bit_depth=12)
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE)
+    with pytest.raises(ValueError, match="bit_depth"):
+        plan.apply(tiles, bit_depth=12)

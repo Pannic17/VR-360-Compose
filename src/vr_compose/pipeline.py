@@ -44,7 +44,7 @@ import numpy.typing as npt
 from vr_compose import encode, io, memory, verify
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
-from vr_compose.stitch import DEFAULT_SAMPLER
+from vr_compose.stitch import BIT_DEPTHS, DEFAULT_FEATHER_POWER, DEFAULT_SAMPLER
 from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 
 U8 = npt.NDArray[np.uint8]
@@ -174,6 +174,7 @@ class SequenceJob:
     warp_threads: int = DEFAULT_THREADS
     sampler: str = DEFAULT_SAMPLER
     """How a tile is read at a fractional position; see :data:`vr_compose.stitch.SAMPLERS`."""
+    feather_power: float = DEFAULT_FEATHER_POWER
     stats_every: int = 100
     """Run the geometry gate on frames 0, N, 2N, ... of the job."""
     resume: bool = True
@@ -309,14 +310,26 @@ def _prefetch_tiles(
 
 
 def _stitch_one(
-    plan: WarpPlan, tiles: dict[int, U8], *, threads: int, gate: bool
-) -> tuple[U8, verify.Agreement | None, float, float]:
+    plan: WarpPlan, tiles: dict[int, U8], *, threads: int, gate: bool, bit_depth: int = 8
+) -> tuple[io.Panorama, verify.Agreement | None, float, float]:
     """One frame: `(image, gate report or None, warp seconds, gate seconds)`."""
     started = time.time()
-    result = plan.apply(tiles, with_stats=gate, threads=threads)
+    result = plan.apply(tiles, with_stats=gate, threads=threads, bit_depth=bit_depth)
     warped = time.time()
     report = verify.agreement(result.stats) if gate else None
     return result.image, report, warped - started, time.time() - warped
+
+
+def _delivery_frame(image: io.Panorama) -> U8:
+    """Narrow a panorama to the 8-bit frame ffmpeg is fed.
+
+    The MP4 path is 8-bit by construction -- `bit_depth` is a master-only option, and the
+    delivery spec pins 8-bit 4:2:0 anyway -- so this is a guard rather than a conversion.
+    Casting silently would turn a future mis-wiring into a 256x-too-dark video.
+    """
+    if image.dtype != np.uint8:
+        raise ValueError(f"the delivery path needs 8-bit frames, got {image.dtype}")
+    return np.asarray(image, dtype=np.uint8)
 
 
 def _check_disk(job: SequenceJob) -> None:
@@ -367,15 +380,18 @@ def run_sequence(
     master = (job.spec.master_width, job.spec.master_height)
     if plan is None:
         say("building warp plan ...")
-        plan = WarpPlan.build(job.rig, *master, tile_size, sampler=job.sampler)
+        plan = WarpPlan.build(
+            job.rig, *master, tile_size, sampler=job.sampler, feather_power=job.feather_power
+        )
         say(
             f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB, "
             f"{plan.sampler})"
         )
-    elif (plan.width, plan.height, plan.tile_size, plan.sampler) != (
+    elif (plan.width, plan.height, plan.tile_size, plan.sampler, plan.feather_power) != (
         *master,
         tile_size,
         job.sampler,
+        job.feather_power,
     ):
         raise ValueError("the supplied warp plan does not match this job")
 
@@ -433,7 +449,7 @@ def run_sequence(
                                 f"{report.report()}"
                             )
                     write_started = time.time()
-                    writer.write(image)
+                    writer.write(_delivery_frame(image))
                     written = time.time()
                     stages.decode_wait += waited
                     stages.warp += warp_seconds
@@ -535,16 +551,23 @@ def frames_in_segments(job: SequenceJob) -> Iterable[int]:
 #   2.77 s at 6 (AGENTS.md section 8), against a 1.9 s warp. Level 1 by default, and the
 #   writes go to a small thread pool -- Pillow releases the GIL inside the encoder -- so
 #   they overlap the next frame's warp instead of adding to it.
-# * **Disk is the constraint, not bitrate.** 39.6 MiB a frame measured, so the 778-frame
-#   job is 30 GiB -- fifteen times the MP4. The precheck refuses up front rather than
-#   dying half way through.
+# * **Disk is the constraint, not bitrate.** 39.6 MiB a frame measured at 8 bits, so the
+#   778-frame job is 30 GiB -- fifteen times the MP4 -- and about 101 GiB at 16 bits. The
+#   precheck refuses up front rather than dying half way through.
 
-MASTER_BYTES_PER_PIXEL = 1.6
-"""Conservative estimate, for the disk precheck only.
+MASTER_BYTES_PER_PIXEL = {8: 1.6, 16: 5.0}
+"""Conservative estimate per bit depth, for the disk precheck only.
 
-Real 8K masters of this content measure **39.6 MiB a frame** at compress_level 1, i.e.
-1.41 bytes/pixel -- lossless PNG on high-frequency lava geometry gets less than a 2:1
-saving over raw RGB. 1.6 leaves room for busier frames without ever under-reserving."""
+Real 8K masters of this content measure **39.6 MiB a frame** at 8 bits (1.41
+bytes/pixel) and **133.4 MiB at 16** (4.53) -- lossless PNG on high-frequency lava
+geometry gets less than a 2:1 saving over raw RGB, and the extra depth is the resample's
+sub-level detail, which is noise-like and barely compresses. The "Up" filter in
+:func:`vr_compose.io.write_png16` takes the 16-bit figure down from 153.9 MiB, a 13%
+saving rather than the halving one might hope for, for the same reason.
+
+Each figure carries headroom over the measurement so a busier frame cannot make the
+precheck under-reserve. A 778-frame 8K master set is about 30 GiB at 8 bits and
+**101 GiB at 16** -- which is the number worth knowing before starting one."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -565,6 +588,14 @@ class MasterJob:
     decode_workers: int = 4
     warp_threads: int = DEFAULT_THREADS
     sampler: str = DEFAULT_SAMPLER
+    feather_power: float = DEFAULT_FEATHER_POWER
+    bit_depth: int = 8
+    """8 for a delivery-comparable master, 16 to keep the resample's sub-level precision.
+
+    The source is 8-bit, so 16 bits add nothing *from the render*; what they keep is what
+    the interpolation and the blend produced between levels, which 8-bit quantisation
+    discards. Worth it for a master something later resamples again -- and it is what
+    makes an eventual EXR source a drop-in (ROADMAP P4 item 6)."""
     write_workers: int = 1
     """PNG encodes in flight.
 
@@ -586,6 +617,8 @@ class MasterJob:
             raise ValueError(f"master width must be even and positive, got {self.width}")
         if not 0 <= self.compress_level <= 9:
             raise ValueError(f"compress_level must be 0..9, got {self.compress_level}")
+        if self.bit_depth not in BIT_DEPTHS:
+            raise ValueError(f"bit_depth must be one of {BIT_DEPTHS}, got {self.bit_depth}")
         if self.write_workers < 1:
             raise ValueError("write_workers must be >= 1")
 
@@ -605,7 +638,8 @@ class MasterJob:
 
     def estimated_bytes(self, frames: int | None = None) -> int:
         count = len(self.frames) if frames is None else frames
-        return int(count * self.width * self.height * MASTER_BYTES_PER_PIXEL)
+        rate = MASTER_BYTES_PER_PIXEL[self.bit_depth]
+        return int(count * self.width * self.height * rate)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -657,16 +691,24 @@ def run_master(
 
     if plan is None:
         say("building warp plan ...")
-        plan = WarpPlan.build(job.rig, job.width, job.height, tile_size, sampler=job.sampler)
+        plan = WarpPlan.build(
+            job.rig,
+            job.width,
+            job.height,
+            tile_size,
+            sampler=job.sampler,
+            feather_power=job.feather_power,
+        )
         say(
             f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB, "
             f"{plan.sampler})"
         )
-    elif (plan.width, plan.height, plan.tile_size, plan.sampler) != (
+    elif (plan.width, plan.height, plan.tile_size, plan.sampler, plan.feather_power) != (
         job.width,
         job.height,
         tile_size,
         job.sampler,
+        job.feather_power,
     ):
         raise ValueError("the supplied warp plan does not match this job")
 
@@ -684,7 +726,7 @@ def run_master(
     def decode(frame: int) -> dict[int, U8]:
         return io.load_tiles(job.source, frame, indices, workers=job.decode_workers)
 
-    def write_one(frame: int, image: U8) -> int:
+    def write_one(frame: int, image: io.Panorama) -> int:
         return io.write_png_atomically(
             job.frame_path(frame), image, compress_level=job.compress_level
         )
@@ -701,7 +743,11 @@ def run_master(
                 if stop.is_set():
                     raise Cancelled(f"cancelled after {written} of {len(todo)} frame(s)")
                 image, report, warp_seconds, gate_seconds = _stitch_one(
-                    plan, tiles, threads=job.warp_threads, gate=(done % job.stats_every) == 0
+                    plan,
+                    tiles,
+                    threads=job.warp_threads,
+                    gate=(done % job.stats_every) == 0,
+                    bit_depth=job.bit_depth,
                 )
                 if report is not None:
                     reports.append(report)

@@ -213,7 +213,7 @@ def test_png_masters_land_at_the_native_density(
     assert code == 0
     assert sorted(p.name for p in out.glob("*.png")) == ["S.0001.png", "S.0002.png"]
     printed = capsys.readouterr().out
-    assert "master     : 256x128 PNG" in printed, printed
+    assert "master     : 256x128 8-bit PNG" in printed, printed
     assert "2 master(s)" in printed
 
 

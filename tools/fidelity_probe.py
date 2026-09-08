@@ -37,7 +37,7 @@ from vr_compose.stitch import SAMPLERS, stitch_frame
 
 F32 = npt.NDArray[np.float32]
 F64 = npt.NDArray[np.float64]
-U8 = npt.NDArray[np.uint8]
+Panorama = npt.NDArray[np.uint8] | npt.NDArray[np.uint16]
 
 DEFAULT_ROOT = pathlib.Path("E:/22")
 CENTRAL = 0.5
@@ -45,7 +45,7 @@ CENTRAL = 0.5
 dominant contributor to the master, so a difference is the blend's, not the sampler's."""
 
 
-def sample_equirect(master: U8, lon: F64, lat: F64) -> F32:
+def sample_equirect(master: Panorama, lon: F64, lat: F64) -> F32:
     """Bilinear sample of an equirect image at the given directions.
 
     Longitude wraps; latitude clamps. The same for every candidate master, so it adds a
@@ -79,6 +79,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=pathlib.Path, default=DEFAULT_ROOT)
     parser.add_argument("--frame", type=int, default=1656)
     parser.add_argument("--width", type=int, default=7680, help="master width; native is fairest")
+    parser.add_argument(
+        "--feathers",
+        type=float,
+        nargs="+",
+        default=None,
+        help="sweep feather exponents at the default sampler instead of sweeping samplers",
+    )
     parser.add_argument(
         "--cameras",
         type=int,
@@ -119,12 +126,16 @@ def main(argv: list[str] | None = None) -> int:
         f"frame {args.frame}, master {args.width}x{args.width // 2}, "
         f"tiles {cameras}, scored over the central {CENTRAL:.0%} of each tile\n"
     )
-    print(
-        f"  {'sampler':<11} {'stitch':>8}  " + "  ".join(f"cam{c:<7}" for c in cameras) + "  mean"
+    label = "feather" if args.feathers else "sampler"
+    print(f"  {label:<11} {'stitch':>8}  " + "  ".join(f"cam{c:<7}" for c in cameras) + "  mean")
+    variants: list[tuple[str, dict[str, object]]] = (
+        [(f"{power:g}", {"feather_power": power}) for power in args.feathers]
+        if args.feathers
+        else [(sampler, {"sampler": sampler}) for sampler in SAMPLERS]
     )
-    for sampler in SAMPLERS:
+    for name, options in variants:
         started = time.time()
-        master = stitch_frame(tiles, rig, args.width, sampler=sampler).image
+        master = stitch_frame(tiles, rig, args.width, **options).image  # type: ignore[arg-type]
         elapsed = time.time() - started
         scores = []
         for camera in cameras:
@@ -136,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             original = tiles[camera].reshape(-1, 3)[central].astype(np.float32)
             scores.append(psnr(reconstructed, original))
         print(
-            f"  {sampler:<11} {elapsed:7.1f}s  "
+            f"  {name:<11} {elapsed:7.1f}s  "
             + "  ".join(f"{s:7.2f} dB" for s in scores)
             + f"  {float(np.mean(scores)):7.2f} dB"
         )

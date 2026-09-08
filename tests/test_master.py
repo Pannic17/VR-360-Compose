@@ -77,7 +77,7 @@ def test_master_pixels_equal_the_frame_command(
         assert np.array_equal(np.asarray(image), reference), "pixels must match the stitcher"
 
     direct = tmp_path / "direct.png"
-    io.write_png(direct, reference, compress_level=6)
+    io.write_png(direct, np.asarray(reference, np.uint8), compress_level=6)
     assert written.read_bytes() == direct.read_bytes(), "same level, same bytes"
 
 
@@ -162,10 +162,14 @@ def test_the_estimate_only_counts_what_is_left_to_write(
     still_source: source.SourceSet, tmp_path: pathlib.Path
 ) -> None:
     job = _job(still_source, tmp_path / "out")
-    rate = pipeline.MASTER_BYTES_PER_PIXEL
+    rate = pipeline.MASTER_BYTES_PER_PIXEL[8]
     assert job.estimated_bytes() == int(5 * NATIVE * (NATIVE // 2) * rate)
     assert job.estimated_bytes(2) == int(2 * NATIVE * (NATIVE // 2) * rate)
     assert rate > 1.41, "must not under-reserve: real 8K masters measure 1.41 bytes/pixel"
+
+    # 16 bits roughly doubles the file, and the estimate has to follow or the precheck lies
+    deep = _job(still_source, tmp_path / "out", bit_depth=16)
+    assert deep.estimated_bytes() > job.estimated_bytes() * 1.9
 
 
 def test_the_gate_runs_on_masters_too(
@@ -197,3 +201,43 @@ def test_job_validation() -> None:
         pipeline.MasterJob(source=None, compress_level=11, **common)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="write_workers"):
         pipeline.MasterJob(source=None, write_workers=0, **common)  # type: ignore[arg-type]
+
+
+def test_sixteen_bit_masters_keep_sub_level_precision(
+    still_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The point of 16 bits with an 8-bit source: what the *blend* produced between levels.
+
+    Pillow cannot write 16-bit RGB PNG, so `io.write_png16` emits it directly; Pillow can
+    still read one, by downconverting to the high byte, which is what makes the last
+    assertion here a check on the file rather than on our own writer.
+    """
+    eight = pipeline.run_master(_job(still_source, tmp_path / "eight"))
+    sixteen = pipeline.run_master(_job(still_source, tmp_path / "sixteen", bit_depth=16))
+    assert eight.written == sixteen.written == len(FRAMES)
+    assert sixteen.bytes_written > eight.bytes_written, "twice the depth, more bytes"
+
+    deep = tmp_path / "sixteen" / f"S.{FRAMES[0]:04d}.png"
+    header = deep.read_bytes()[8:33]
+    assert header[4:8] == b"IHDR"
+    assert header[16] == 16, "bit depth in the IHDR"
+    assert header[17] == 2, "colour type 2 = RGB"
+
+    with Image.open(deep) as image:
+        high_byte = np.asarray(image.convert("RGB"))
+    with Image.open(tmp_path / "eight" / f"S.{FRAMES[0]:04d}.png") as image:
+        shallow = np.asarray(image)
+
+    # 257 maps 255 exactly onto 65535, so the two agree to within a rounding step
+    assert np.abs(high_byte.astype(int) - shallow.astype(int)).max() <= 1
+
+
+def test_the_delivery_path_refuses_a_deep_frame() -> None:
+    """A 16-bit frame reaching ffmpeg would be a 256x-too-dark video, not an error."""
+    with pytest.raises(ValueError, match="8-bit frames"):
+        pipeline._delivery_frame(np.zeros((4, 8, 3), np.uint16))
+
+
+def test_bit_depth_is_validated(still_source: source.SourceSet, tmp_path: pathlib.Path) -> None:
+    with pytest.raises(ValueError, match="bit_depth"):
+        _job(still_source, tmp_path / "out", bit_depth=12)
