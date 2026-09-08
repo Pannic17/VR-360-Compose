@@ -84,7 +84,7 @@ class _CancelScope:
     """Turns Ctrl-C into a flag the frame loop checks, so no frame is cut in half.
 
     Only the main thread can carry a signal handler, and only the main thread's handler
-    is ever installed -- a GUI (P6) or a test drives cancellation through the `cancel`
+    is ever installed -- a GUI (P7) or a test drives cancellation through the `cancel`
     event instead, which is the same mechanism without the signal.
 
     A second Ctrl-C restores the default handler, so an impatient user still gets the
@@ -503,7 +503,7 @@ def default_output_dir() -> pathlib.Path:
     """Where output lands when no path is given: beside the program.
 
     Frozen by PyInstaller that is the executable's directory; from source it is the
-    project root. The GUI (P6) will offer a chooser; until then the user's decision is
+    project root. The GUI (P7) will offer a chooser; until then the user's decision is
     "next to where it runs".
     """
     if getattr(sys, "frozen", False):

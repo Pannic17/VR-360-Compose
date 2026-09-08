@@ -34,7 +34,7 @@ def test_reference_set_matches_the_documented_shape(reference_set: source.Source
     assert FRAME in reference_set.frames
 
 
-@pytest.mark.parametrize("sampler", ["nearest", "bilinear"])
+@pytest.mark.parametrize("sampler", ["nearest", "bilinear", "catmullrom"])
 def test_metric_a_holds_on_real_tiles(reference_set: source.SourceSet, sampler: str) -> None:
     rig = rig_for(reference_set.camera_count)
     tiles = io.load_tiles(reference_set, FRAME, list(rig.unique_indices), workers=8)
@@ -71,3 +71,20 @@ def test_interpolating_improves_every_metric_a_figure(reference_set: source.Sour
     assert bilinear.fraction_over_8 < nearest.fraction_over_8 * 0.25, (
         "the outliers were overwhelmingly half-pixel placement error"
     )
+
+
+def test_metric_a_does_not_rank_fidelity(reference_set: source.SourceSet) -> None:
+    """The trap this metric sets, pinned so nobody reads it as a quality score.
+
+    Catmull-Rom scores *worse* on agreement than bilinear while reconstructing the source
+    render 1.24 dB better (`tools/fidelity_probe.py`). Agreement rewards smoothness, and a
+    sharper kernel overshoots at edges, so two tiles sampling one direction from different
+    sub-pixel offsets disagree more. Both facts are real; only one of them is about detail.
+    """
+    rig = rig_for(reference_set.camera_count)
+    tiles = io.load_tiles(reference_set, FRAME, list(rig.unique_indices), workers=8)
+    bilinear = verify.agreement(stitch_frame(tiles, rig, 3840, sampler="bilinear").stats)
+    cubic = verify.agreement(stitch_frame(tiles, rig, 3840, sampler="catmullrom").stats)
+
+    assert cubic.median > bilinear.median, "if this flips, re-read verify.BASELINES"
+    assert cubic.passed and bilinear.passed, "both must still clear the geometry gate"

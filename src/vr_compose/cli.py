@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-The GUI in P6 must be a thin shell over exactly this code, so every operation lives in a
+The GUI in P7 must be a thin shell over exactly this code, so every operation lives in a
 library module and this file only parses arguments and prints. Nothing here hardcodes a
 source path: `--source` is optional and discovery fills it in (AGENTS.md §2, constraint 3).
 """

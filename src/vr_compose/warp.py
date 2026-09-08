@@ -45,6 +45,7 @@ from vr_compose.stitch import (
     StitchResult,
     _feather,
     bilinear_blend,
+    cubic_blend,
     luma_bt709,
 )
 
@@ -164,8 +165,12 @@ class WarpPlan:
                         x[visible], y[visible], tile_size, rig.fov_deg
                     )
                     fx, fy = empty, empty
-                else:
+                elif sampler == "bilinear":
                     column, row, fx, fy = projection.tile_bilinear_taps(
+                        x[visible], y[visible], tile_size, rig.fov_deg
+                    )
+                else:
+                    column, row, fx, fy = projection.tile_cubic_taps(
                         x[visible], y[visible], tile_size, rig.fov_deg
                     )
                 out_index = (np.flatnonzero(visible) + base).astype(np.int32)
@@ -256,7 +261,7 @@ class WarpPlan:
                 src_index = tile.src_index[start:stop]
                 if self.sampler == "nearest":
                     sampled = source[src_index].astype(np.float32)
-                else:
+                elif self.sampler == "bilinear":
                     # The 2x2 neighbours are index arithmetic on a flattened tile, which
                     # is why the plan stores one index and two fractions. The top-left is
                     # clamped at build time so `+ size + 1` cannot leave the tile.
@@ -268,6 +273,28 @@ class WarpPlan:
                             source[src_index + step].astype(np.float32),
                             source[src_index + step + 1].astype(np.float32),
                         ),
+                        tile.fx[start:stop],
+                        tile.fy[start:stop],
+                    )
+                else:
+                    step = self.tile_size
+
+                    def cubic_row(
+                        offset: int,
+                        base: I32 = src_index,
+                        step: int = step,
+                        source: U8 = source,
+                    ) -> tuple[F32, F32, F32, F32]:
+                        start_of_row = base + offset * step
+                        return (
+                            source[start_of_row].astype(np.float32),
+                            source[start_of_row + 1].astype(np.float32),
+                            source[start_of_row + 2].astype(np.float32),
+                            source[start_of_row + 3].astype(np.float32),
+                        )  # fmt: skip
+
+                    sampled = cubic_blend(
+                        (cubic_row(0), cubic_row(1), cubic_row(2), cubic_row(3)),
                         tile.fx[start:stop],
                         tile.fy[start:stop],
                     )

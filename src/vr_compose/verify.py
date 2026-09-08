@@ -38,6 +38,7 @@ __all__ = [
 BASELINES = {
     "nearest": {"median": 0.68, "mean": 1.02, "p95": 3.10, "fraction_over_8": 0.0025},
     "bilinear": {"median": 0.48, "mean": 0.77, "p95": 2.52, "fraction_over_8": 0.00037},
+    "catmullrom": {"median": 0.52, "mean": 0.81, "p95": 2.58, "fraction_over_8": 0.00047},
 }
 """Measured by this code on frame 1656 of the reference data, 3840x1920, per sampler.
 
@@ -49,11 +50,19 @@ it belongs, and two tiles rounding a shared direction in different directions di
 whatever the image gradient is across that offset. What is left is closer to the floor the
 source itself sets (TAA jitter, up to 1 level between tiles, AGENTS.md §3).
 
+**This metric does not rank fidelity, and must not be read as if it did.** It measures
+how closely overlapping tiles *agree*, so a blurrier reconstruction scores better merely
+by being smoother, and a sharper kernel that overshoots at an edge scores worse even
+where it is more faithful. Catmull-Rom sits at 0.52, *above* bilinear's 0.48, while
+reconstructing the source render 1.24 dB *better* (`tools/fidelity_probe.py`). Use this
+metric for what it is -- a geometry gate and a regression tripwire -- and the round-trip
+probe for questions about detail.
+
 The nearest figures are slightly under the 0.70/1.04/3.14/0.26% first recorded in
 AGENTS.md §9, which came from a probe script using BT.601 luma weights; this module uses
 BT.709 to match the colour space the delivery spec tags. At 7680x3840 the medians are
-0.67 and 0.48 -- mildly resolution-dependent for nearest, essentially flat for bilinear,
-so compare like with like.
+0.67, 0.48 and 0.52 -- mildly resolution-dependent for nearest, flat for the two
+interpolating samplers, so compare like with like.
 """
 
 BASELINE = BASELINES[DEFAULT_SAMPLER]

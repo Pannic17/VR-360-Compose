@@ -37,6 +37,7 @@ __all__ = [
     "rot_y",
     "rot_z",
     "tile_bilinear_taps",
+    "tile_cubic_taps",
     "tile_pixel_index",
     "tile_pixel_position",
     "tile_rays",
@@ -176,6 +177,28 @@ def tile_bilinear_taps(x: F64, y: F64, size: int, fov_deg: float) -> tuple[I32, 
     top = np.clip(np.floor(row), 0, max(size - 2, 0))
     fx = np.clip(column - left, 0.0, 1.0).astype(np.float32)
     fy = np.clip(row - top, 0.0, 1.0).astype(np.float32)
+    return (
+        np.asarray(left, np.int32),
+        np.asarray(top, np.int32),
+        np.asarray(fx, np.float32),
+        np.asarray(fy, np.float32),
+    )
+
+
+def tile_cubic_taps(x: F64, y: F64, size: int, fov_deg: float) -> tuple[I32, I32, F32, F32]:
+    """Cubic sampling taps: top-left of a 4x4, and the fractions inside its second cell.
+
+    A cubic kernel reaches one pixel further back than a bilinear one, so the top-left is
+    ``floor(position) - 1`` and the fractions are measured from the *containing* pixel,
+    which is tap 1 of 4. Clamped to ``size - 4`` so ``+ 3`` stays inside the tile, on the
+    same reasoning as :func:`tile_bilinear_taps`: the feather weight is already zero where
+    the clamp bites.
+    """
+    column, row = tile_pixel_position(x, y, size, fov_deg)
+    left = np.clip(np.floor(column) - 1.0, 0, max(size - 4, 0))
+    top = np.clip(np.floor(row) - 1.0, 0, max(size - 4, 0))
+    fx = np.clip(column - (left + 1.0), 0.0, 1.0).astype(np.float32)
+    fy = np.clip(row - (top + 1.0), 0.0, 1.0).astype(np.float32)
     return (
         np.asarray(left, np.int32),
         np.asarray(top, np.int32),

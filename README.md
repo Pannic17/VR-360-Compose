@@ -40,7 +40,7 @@ py -3.13 -m venv .venv
 ```
 
 装好后 `.venv/Scripts/vr-compose.exe` 就是命令入口（下文简写为 `vr-compose`）。
-打包成独立 exe 是 ROADMAP 的 P7。
+打包成独立 exe 是 ROADMAP 的 P8。
 
 ## 快速开始
 

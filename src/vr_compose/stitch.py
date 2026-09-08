@@ -30,6 +30,7 @@ from vr_compose import projection
 from vr_compose.rig import Rig
 
 F32 = npt.NDArray[np.float32]
+I32 = npt.NDArray[np.int32]
 F64 = npt.NDArray[np.float64]
 U8 = npt.NDArray[np.uint8]
 
@@ -39,25 +40,33 @@ __all__ = [
     "BandStats",
     "StitchResult",
     "bilinear_blend",
+    "catmull_rom_weights",
+    "cubic_blend",
     "stitch_bands",
     "stitch_frame",
 ]
 
-SAMPLERS = ("nearest", "bilinear")
-DEFAULT_SAMPLER = "bilinear"
+SAMPLERS = ("nearest", "bilinear", "catmullrom")
+DEFAULT_SAMPLER = "catmullrom"
 """How a tile is read at a fractional position.
 
 `nearest` is P1's, kept because it is the byte-exact baseline the LUT is verified against
 (AGENTS.md section 9, metric D) and because it is the cheapest preview.
 
-`bilinear` is P4's default. The choice is measured, not conventional: `tools/
-resample_probe.py` reports that at native density the map **magnifies** almost
-everywhere -- the minor scale factor is below 1 in every latitude band (median 0.82 at
-the equator, 0.06 at the pole cap) and only 0.1% of directions are minified in both axes.
-Under magnification there is nothing to prefilter, so the mip/EWA machinery P4 was
-originally sketched with would only blur; what nearest actually costs is up to half a
-pixel of positional error, which shows up as replicated blocks. Interpolation is the fix
-for that, and bilinear is the whole of it wherever the footprint is near-isotropic.
+The choice of the other two is measured, not conventional: `tools/resample_probe.py`
+reports that at native density the map **magnifies** almost everywhere -- the minor scale
+factor is below 1 in every latitude band (median 0.82 at the equator, 0.06 at the pole
+cap) and only 0.1% of directions are minified in both axes. Under magnification there is
+nothing to prefilter, so the mip/EWA machinery P4 was originally sketched with would only
+blur; what nearest actually costs is up to half a pixel of positional error, which shows
+up as replicated blocks. **Interpolation** is the fix, and the only question left is how
+sharp a reconstruction to use.
+
+`bilinear` is the cheap answer and `catmullrom` the faithful one -- a 4x4 cubic
+(Catmull-Rom, a = -0.5), which is interpolating (it passes through the samples) and
+noticeably sharper than bilinear under magnification, at four times the taps. It is the
+default because the master is what P4 is for; `--sampler bilinear` is there when
+throughput matters more.
 """
 
 LUMA_BT709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
@@ -133,6 +142,52 @@ class StitchResult:
         if not self.stats.count.size:
             return 0.0
         return float((self.stats.count >= 2).mean())
+
+
+def catmull_rom_weights(f: F32) -> tuple[F32, F32, F32, F32]:
+    """The four Catmull-Rom weights at fraction `f`, for taps at -1, 0, +1, +2.
+
+    The classic cubic with a = -0.5: it interpolates, so a sample lands exactly on the
+    source pixel when `f` is 0, and it has a mild negative lobe, which is what makes it
+    sharper than bilinear -- and what lets it overshoot at a hard edge. The overshoot is
+    clipped when the panorama is quantised, which is the accepted cost of the sharpness.
+
+    Elementwise float32 in a fixed order, for metric D (see :func:`luma_bt709`).
+    """
+    half, one, two = np.float32(0.5), np.float32(1.0), np.float32(2.0)
+    three, five = np.float32(1.5), np.float32(2.5)
+    f2 = f * f
+    f3 = f2 * f
+    return (
+        np.asarray(-half * f3 + f2 - half * f, dtype=np.float32),
+        np.asarray(three * f3 - five * f2 + one, dtype=np.float32),
+        np.asarray(-three * f3 + two * f2 + half * f, dtype=np.float32),
+        np.asarray(half * f3 - half * f2, dtype=np.float32),
+    )
+
+
+def cubic_blend(rows: tuple[tuple[F32, F32, F32, F32], ...], fx: F32, fy: F32) -> F32:
+    """Blend a 4x4 neighbourhood given as four rows of four taps, top row first.
+
+    Separable: each row is collapsed horizontally, then the four results vertically. The
+    order is fixed for the same reason :func:`bilinear_blend`'s is.
+    """
+    wx = catmull_rom_weights(fx)
+    wy = catmull_rom_weights(fy)
+    collapsed = [
+        row[0] * wx[0][:, None]
+        + row[1] * wx[1][:, None]
+        + row[2] * wx[2][:, None]
+        + row[3] * wx[3][:, None]
+        for row in rows
+    ]
+    return np.asarray(
+        collapsed[0] * wy[0][:, None]
+        + collapsed[1] * wy[1][:, None]
+        + collapsed[2] * wy[2][:, None]
+        + collapsed[3] * wy[3][:, None],
+        dtype=np.float32,
+    )
 
 
 def bilinear_blend(taps: tuple[F32, F32, F32, F32], fx: F32, fy: F32) -> F32:
@@ -219,7 +274,7 @@ def stitch_bands(
                     x[visible], y[visible], tile_size, rig.fov_deg
                 )
                 sampled = tile[row, column].astype(np.float32)
-            else:
+            elif sampler == "bilinear":
                 column, row, fx, fy = projection.tile_bilinear_taps(
                     x[visible], y[visible], tile_size, rig.fov_deg
                 )
@@ -233,6 +288,24 @@ def stitch_bands(
                     fx,
                     fy,
                 )
+            else:
+                column, row, fx, fy = projection.tile_cubic_taps(
+                    x[visible], y[visible], tile_size, rig.fov_deg
+                )
+
+                def tap_row(
+                    dy: int, tile: U8 = tile, row: I32 = row, column: I32 = column
+                ) -> tuple[F32, F32, F32, F32]:
+                    return (
+                        tile[row + dy, column].astype(np.float32),
+                        tile[row + dy, column + 1].astype(np.float32),
+                        tile[row + dy, column + 2].astype(np.float32),
+                        tile[row + dy, column + 3].astype(np.float32),
+                    )  # fmt: skip
+
+                sampled = cubic_blend(
+                    (tap_row(0), tap_row(1), tap_row(2), tap_row(3)), fx, fy
+                )  # fmt: skip
             w = _feather(x[visible], y[visible], half)
             colour[visible] += sampled * w[:, None]
             weight[visible] += w
