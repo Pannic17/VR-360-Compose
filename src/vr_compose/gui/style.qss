@@ -196,27 +196,38 @@ QRadioButton:disabled {
     color: #a5adb8;
 }
 
+/* Tall enough to read the percentage inside it. The 14px sliver this replaced looked
+   like a divider rather than a progress bar. */
 QProgressBar {
-    background: #eef1f5;
+    background: #ffffff;
     border: 1px solid #dfe3e8;
-    border-radius: 7px;
-    min-height: 14px;
-    max-height: 14px;
+    border-radius: 6px;
+    min-height: 22px;
+    max-height: 22px;
     text-align: center;
-    color: transparent;
+    font-weight: 600;
+    color: #1f2328;
 }
 
+/* The text is centred over the whole groove, so around the halfway mark it straddles the
+   edge of the chunk and has to be legible on both. That fixes the palette: the fills are
+   a step lighter than the buttons use, which puts the dark bold text above 4.5:1 on the
+   fill and far above it on the white groove. A darker, prettier fill would make the
+   middle of every long render unreadable. */
 QProgressBar::chunk {
-    background: #2563eb;
-    border-radius: 6px;
+    background: #3b82f6;
+    border-radius: 5px;
+    /* Without this the chunk of a low percentage is a rounded rectangle floating in the
+       groove; a margin makes it read as a fill. */
+    margin: 1px;
 }
 
 QProgressBar[state="done"]::chunk {
-    background: #16833a;
+    background: #1f9d4d;
 }
 
 QProgressBar[state="fail"]::chunk {
-    background: #c62828;
+    background: #e05c5c;
 }
 
 QPlainTextEdit#logTextEdit {

@@ -58,7 +58,13 @@ UI_FILE = HERE / "main_window.ui"
 QSS_FILE = HERE / "style.qss"
 
 CHOOSE_STEM = "— 请选择 —"
-"""Placeholder shown when a directory holds several scenes.
+"""Placeholder shown when a directory holds several renders.
+
+A "stem" is the prefix UE gave the files -- `L_Cathedral` in `L_Cathedral.1656.png` --
+so it is the level or sequence name. It has nothing to do with left and right eyes
+(`L_` is UE's Level prefix), and one is present in every source set, single or not: it
+is the name every output is built from. The control only asks a question when one set of
+`Camera*` directories holds more than one render, which is why the label reads 渲染名.
 
 ROADMAP P6 item 6: with more than one stem the user picks, and the tool does not quietly
 take the first. A combo box always has something selected, so the something is this, and
@@ -97,7 +103,8 @@ class ComposeWindow(QMainWindow):
         self._cancelling = False
 
         loaded = self._load_ui()
-        self.setWindowTitle(f"{loaded.windowTitle()}  {__version__}")
+        self.base_title = f"{loaded.windowTitle()}  {__version__}"
+        self.setWindowTitle(self.base_title)
         self.resize(loaded.size())
         central = loaded.takeCentralWidget()
         if central is None:
@@ -227,7 +234,10 @@ class ComposeWindow(QMainWindow):
             # more than one scene: make the user pick (P6 item 6)
             self.stem_combo.addItem(CHOOSE_STEM)
             self.stem_combo.addItems([s.stem for s in found])
-            self.log(f"这个目录里有 {len(found)} 个场景，请选择要处理的那个。")
+            names = "、".join(s.stem for s in found)
+            self.log(
+                f"这个目录里有 {len(found)} 套渲染（文件名前缀：{names}），请选择要处理的那个。"
+            )
         else:
             self.stem_combo.addItems([s.stem for s in found])
         self.stem_combo.setEnabled(bool(found))
@@ -362,12 +372,18 @@ class ComposeWindow(QMainWindow):
             # A directory was chosen, but the video path wants a file inside it. Naming it
             # here rather than letting the CLI default keeps the output where the user
             # pointed, and keeps resume possible: the path is printed and reusable.
+            # `unique_path` because this name is auto-generated even though `--out` is
+            # explicit: the user picked a *directory*, not a name, so the P5 promise that
+            # an auto-generated name is a fresh output still applies. Minute-resolution
+            # stamps make two runs in one minute collide otherwise.
             argv += [
                 "--out",
                 str(
-                    directory / pipeline.default_master_dir_name(chosen, stamp)
-                    if not video
-                    else directory / pipeline.default_output_name(chosen, stamp)
+                    pipeline.unique_path(
+                        directory / pipeline.default_master_dir_name(chosen, stamp)
+                        if not video
+                        else directory / pipeline.default_output_name(chosen, stamp)
+                    )
                 ),
             ]
         return argv
@@ -382,9 +398,14 @@ class ComposeWindow(QMainWindow):
         self.log("$ " + " ".join(argv))
         self.total_frames = 0
         self._cancelling = False
-        self.progress_bar.setValue(0)
         self.progress_bar.setProperty("state", "")
+        # Busy (indeterminate) until the `start` event says how many frames there are.
+        # Discovery, the warp plan and the disk pre-check happen first and take a few
+        # seconds; a bar frozen at 0% for that long reads as "nothing is happening".
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("准备中…")
         refresh_style(self.progress_bar)
+        self.progress_detail.setText("正在发现来源、构建 warp 表、预检磁盘…")
         self.set_status("running", "运行中")
         self.set_running(True)
 
@@ -431,9 +452,16 @@ class ComposeWindow(QMainWindow):
         if kind == "start":
             self.total_frames = int(event.get("total", 0))
             self.progress_bar.setRange(0, max(self.total_frames, 1))
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("%p%   ·   %v / %m 帧")
             self.log(f"开始：{event.get('describe', '')} → {event.get('output', '')}")
         elif kind == "progress":
-            self.progress_bar.setValue(int(event.get("done", 0)))
+            done = int(event.get("done", 0))
+            self.progress_bar.setValue(done)
+            # Also in the title, which is what the taskbar shows: an 8K job runs for
+            # hours and nobody watches the window for all of it.
+            total = max(self.total_frames, 1)
+            self.setWindowTitle(f"{done * 100 // total}%  ·  {self.base_title}")
             eta = float(event.get("eta_seconds", 0.0))
             self.progress_detail.setText(
                 f"帧 {event.get('frame')}   {event.get('done')}/{event.get('total')}   "
@@ -472,14 +500,29 @@ class ComposeWindow(QMainWindow):
     def _process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.ProcessError.FailedToStart:
             self.log(f"无法启动子进程：{' '.join(worker_command())}")
+            self._leave_busy()
+            self.setWindowTitle(self.base_title)
             self.set_status("fail", "启动失败")
             self.set_running(False)
             self.process = None
+
+    def _leave_busy(self) -> None:
+        """Take the bar out of indeterminate mode.
+
+        Needed on every exit path: a job that fails during the pre-render phase never
+        sends a `start` event, and a bar left sweeping forever after the run is over is
+        the one thing worse than a bar that does not move.
+        """
+        if self.progress_bar.maximum() == 0:
+            self.progress_bar.setRange(0, 1)
+        self.progress_bar.setFormat("%p%")
 
     @Slot()
     def _finished(self, code: int, _status: QProcess.ExitStatus) -> None:
         self.process = None
         self.set_running(False)
+        self._leave_busy()
+        self.setWindowTitle(self.base_title)
         if code == 0:
             self.progress_bar.setValue(self.progress_bar.maximum())
             self.progress_bar.setProperty("state", "done")

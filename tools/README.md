@@ -20,7 +20,8 @@
 | `seam_probe.py` | §8「接缝、羽化指数」—— 20 点接缝梯度不连续性 + 羽化扫描 | 约 2 分钟 |
 | `temporal_probe.py` | §8「时域稳定性」—— 连续 10 帧的方差与与网格无关的跳变界 | 约 4 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
-| `package_probe.py` | §7 打包体积/启动时间、冻结后进程池 | 每种配置约 90 s 构建 |
+| `package_probe.py` | §7 打包体积/启动时间、冻结后进程池（**探针**，用合成小程序） | 每种配置约 90 s 构建 |
+| `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明 + 冒烟校验 | 约 2 分钟 |
 
 已经进产品代码、不再需要独立脚本的：
 
@@ -40,10 +41,8 @@
 ```
 
 ```bash
-.\.venv\Scripts\python.exe tools
-esample_probe.py
-.\.venv\Scripts\python.exe tools
-esample_probe.py --tile 3840 --output-width 7680
+.\.venv\Scripts\python.exe tools\resample_probe.py
+.\.venv\Scripts\python.exe tools\resample_probe.py --tile 3840 --output-width 7680
 ```
 
 `resample_probe.py` 是 P4 加的，回答的是 `coverage_map.py` 回答不了的那个问题：
@@ -79,6 +78,16 @@ esample_probe.py --tile 3840 --output-width 7680
 ```bash
 .\.venv\Scripts\python.exe tools\package_probe.py --configs excluded_onedir
 ```
+
+```bash
+.\.venv\Scripts\python.exe tools\build_exe.py --source E:/22
+```
+
+`build_exe.py` 与 `package_probe.py` 的分工：探针是拿一个合成的小程序去量**打包方式的代价**
+（onedir 对 onefile、要不要写排除列表、冻结后进程池行不行）；
+`build_exe.py` 是照那些结论**真的产出可分发的文件夹** ——
+PyInstaller 走 `VR-Compose.spec`，然后把 ffmpeg/ffprobe 和中文说明放进去，
+最后拿**打包好的 exe**（不是源码）跑一次两帧渲染，并与源码跑出来的**逐字节比对**。
 
 ## 已复现的关键数字
 

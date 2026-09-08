@@ -263,7 +263,7 @@ def test_auto_named_output_uses_the_stem_and_a_timestamp(
 
     def one_stamp(*_args: object, **_kwargs: object) -> str:
         calls.append("read")
-        return f"20260908_16300{len(calls)}"
+        return f"0908_163{len(calls)}"
 
     monkeypatch.setattr(pipeline, "run_stamp", one_stamp)
     monkeypatch.setattr(pipeline, "default_output_dir", lambda: tmp_path / "beside")
@@ -272,7 +272,7 @@ def test_auto_named_output_uses_the_stem_and_a_timestamp(
                  "--no-bar"]) == 0  # fmt: skip
     assert calls == ["read"], "the clock is read once per run"
     made = sorted(p.name for p in (tmp_path / "beside").iterdir())
-    assert made == ["S_20260908_163001"], made
+    assert made == ["S_0908_1631"], made
     assert sorted(p.name for p in (tmp_path / "beside" / made[0]).glob("*.png")) == [
         "S_S_0001.png",
         "S_S_0002.png",
@@ -280,7 +280,37 @@ def test_auto_named_output_uses_the_stem_and_a_timestamp(
 
     calls.clear()
     printed = capsys.readouterr()
-    assert "S_20260908_163001" in printed.out, "the chosen path is printed, to allow resume"
+    assert "S_0908_1631" in printed.out, "the chosen path is printed, to allow resume"
+
+
+def test_two_auto_named_runs_in_one_minute_do_not_share_a_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`MMDD_HHMM` can repeat, so the second run gets `_2` rather than the first's output.
+
+    P5 promises an auto-generated name is a fresh output every run -- that is why it does
+    not resume. With seconds in the stamp the promise held by itself; with the width the
+    user asked for on 2026-09-08 it needs `pipeline.unique_path`, and this is the test
+    that says so. Without it the second run would adopt the first run's finished frames,
+    which is wrong the moment any setting differs between them.
+    """
+    from vr_compose import pipeline
+
+    _png_source(tmp_path / "src")
+    monkeypatch.setattr(pipeline, "run_stamp", lambda *_a, **_k: "0908_1630")
+    monkeypatch.setattr(pipeline, "default_output_dir", lambda: tmp_path / "beside")
+
+    argv = ["--source", str(tmp_path / "src"), "sequence", "--out-format", "png", "--no-bar"]
+    assert main(argv) == 0
+    assert main(argv) == 0
+
+    made = sorted(p.name for p in (tmp_path / "beside").iterdir())
+    assert made == ["S_0908_1630", "S_0908_1630_2"], made
+    for name in made:
+        assert sorted(p.name for p in (tmp_path / "beside" / name).glob("*.png")) == [
+            "S_S_0001.png",
+            "S_S_0002.png",
+        ], f"{name} is a complete run of its own, not half of a shared one"
 
 
 def test_the_video_name_is_stem_and_timestamp(tmp_path: pathlib.Path) -> None:
@@ -289,4 +319,4 @@ def test_the_video_name_is_stem_and_timestamp(tmp_path: pathlib.Path) -> None:
 
     _png_source(tmp_path / "src")
     chosen = next(s for s in source_mod.scan(tmp_path / "src") if s.usable)
-    assert pipeline.default_output_name(chosen, "20260908_163000") == "S_20260908_163000.mp4"
+    assert pipeline.default_output_name(chosen, "0908_1630") == "S_0908_1630.mp4"

@@ -4,7 +4,7 @@ It lives at the root, next to the future `.spec`, for the same reason VR-Install
 `main_ui.py` does: a spec names a script, and a script at the root is the one place both
 a checkout and a frozen build can agree on.
 
-Three things it has to get right, none of which the `vr-compose-gui` console script can
+Four things it has to get right, none of which the `vr-compose-gui` console script can
 do for a frozen build:
 
 **One executable, two faces.** A frozen build is a single exe, and the window runs a
@@ -25,6 +25,11 @@ someone adds a pool.
 checkout cannot import it unless the project is installed. Adding `src/` when it is
 there costs nothing and makes this file work either way, which is what you want from the
 script a build is aimed at.
+
+A fourth thing is cosmetic but visible: the build must be a *console* application,
+because a windowed PyInstaller build leaves `sys.stdout` as None and both faces write to
+it. `_hide_own_console` therefore hides the console when -- and only when -- this process
+is the sole owner of it, which is what a double-click looks like.
 """
 
 from __future__ import annotations
@@ -46,6 +51,36 @@ def _make_package_importable() -> None:
         sys.path.insert(0, str(SRC))
 
 
+def _hide_own_console() -> None:
+    """Hide the console window, but only if this process is the one it was made for.
+
+    The build has to be a console application: a windowed PyInstaller build leaves
+    `sys.stdout` as None, which would break both faces at once -- the CLI would print
+    nothing, and the window's NDJSON pipe writes to stdout. So the console exists, and a
+    double-click would otherwise show an empty black rectangle behind the window.
+
+    `GetConsoleProcessList` says how many processes share this console. One means it was
+    created for us and nobody else is using it, so hiding it is safe. More than one means
+    we were launched from somebody's terminal, and hiding *that* would be rude -- so this
+    does nothing, which is also what you want when a render is being driven from a shell.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        window = kernel32.GetConsoleWindow()
+        if not window:
+            return
+        buffer = (ctypes.c_uint32 * 2)()
+        if kernel32.GetConsoleProcessList(buffer, 2) == 1:
+            ctypes.windll.user32.ShowWindow(window, 0)  # SW_HIDE
+    except Exception:
+        # A cosmetic tweak must never be the thing that stops the application starting.
+        pass
+
+
 def wants_cli(argv: list[str]) -> bool:
     """Should this invocation be the command line rather than the window?
 
@@ -64,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         from vr_compose.cli import main as run_cli
 
         return run_cli(arguments)
+    _hide_own_console()
     from vr_compose.gui import main as run_gui
 
     return run_gui([sys.argv[0]])

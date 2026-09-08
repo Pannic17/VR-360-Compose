@@ -29,6 +29,7 @@ pytest.importorskip("PySide6", reason="the GUI needs PySide6")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication, QComboBox
 
 from vr_compose.gui.window import CHOOSE_STEM, ComposeWindow, worker_command
@@ -327,6 +328,10 @@ def test_the_window_reports_progress_and_finishes(
         # clears it, so the later `is None` check would look like dead code
         started = window.process
         assert started is not None, "a subprocess, not a thread"
+        # Indeterminate until the `start` event carries the frame count: discovery, the
+        # warp plan and the disk pre-check run first, and a bar stuck at 0% through them
+        # is indistinguishable from a hung job.
+        assert window.progress_bar.maximum() == 0, "the bar should be busy, not at 0%"
 
         deadline = QTimer()
         deadline.timeout.connect(lambda: qt_app.quit() if window.process is None else None)
@@ -337,9 +342,11 @@ def test_the_window_reports_progress_and_finishes(
         assert window.process is None, "the job did not finish in time"
         status = str(window.status_banner.property("status"))
         assert status == "pass", window.log_edit.toPlainText()
+        assert window.progress_bar.maximum() == 3, "the busy phase ended with a real total"
         assert window.progress_bar.value() == window.progress_bar.maximum()
         assert str(window.progress_bar.property("state")) == "done"
         assert "s/帧" in window.progress_detail.text()
+        assert window.windowTitle() == window.base_title, "the percentage is off again"
 
         made = sorted(p.name for p in (tmp_path / "out").rglob("*.png"))
         assert [name for name in made if name.startswith("S_S_")] == [
@@ -347,6 +354,61 @@ def test_the_window_reports_progress_and_finishes(
             "S_S_0002.png",
             "S_S_0003.png",
         ], made
+    finally:
+        window.close()
+
+
+def test_the_bar_leaves_the_busy_state_even_without_a_start_event(
+    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job that dies during the pre-render phase never sends `start`.
+
+    Discovery failures, a missing ffmpeg and the disk pre-check all land here, and a bar
+    left sweeping after the run is over is worse than one that never moved.
+
+    The failure branch raises a modal, which offscreen has nobody to dismiss it -- hence
+    the patch. Same trap as `build_command`: a modal in a code path under test hangs the
+    suite rather than failing it.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.append(str(a[1:3])))
+
+    window = ComposeWindow()
+    try:
+        window.progress_bar.setRange(0, 0)
+        window._finished(2, QProcess.ExitStatus.NormalExit)
+        assert shown, "a failed job still says so"
+        assert window.progress_bar.maximum() != 0
+        assert window.windowTitle() == window.base_title
+    finally:
+        window.close()
+
+
+def test_progress_events_drive_the_bar_and_the_title(qt_app: QApplication) -> None:
+    """The taskbar is the only progress readout for a job nobody is watching."""
+    window = ComposeWindow()
+    try:
+        window._handle_event({"event": "start", "total": 200, "describe": "x", "output": "y"})
+        assert (window.progress_bar.minimum(), window.progress_bar.maximum()) == (0, 200)
+
+        window._handle_event(
+            {
+                "event": "progress",
+                "done": 50,
+                "total": 200,
+                "frame": 1705,
+                "segment": 1,
+                "segments": 4,
+                "seconds_per_frame": 10.1,
+                "speedup": 4.6,
+                "eta_seconds": 1515.0,
+            }
+        )
+        assert window.progress_bar.value() == 50
+        assert window.windowTitle().startswith("25%"), window.windowTitle()
+        assert "1705" in window.progress_detail.text()
     finally:
         window.close()
 

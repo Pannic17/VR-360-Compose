@@ -31,6 +31,7 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import datetime
+import itertools
 import pathlib
 import shutil
 import signal
@@ -63,6 +64,7 @@ __all__ = [
     "run_master",
     "run_sequence",
     "run_stamp",
+    "unique_path",
 ]
 
 PREVIOUS_PIPELINE_SECONDS_PER_FRAME = 46.85
@@ -552,20 +554,54 @@ def default_output_dir() -> pathlib.Path:
 
 
 def run_stamp(when: datetime.datetime | None = None) -> str:
-    """`YYYYMMDD_HHMMSS` in local time, for the auto-generated output names (P5).
+    """`MMDD_HHMM` in local time, for the auto-generated output names (P5).
 
     No colons: they are illegal in Windows filenames. Local time rather than UTC because
-    the name is for the person who started the render. Sortable either way.
+    the name is for the person who started the render.
+
+    **The user asked for exactly this width** (2026-09-08), and it costs two properties
+    the longer `YYYYMMDD_HHMMSS` had, both worth naming:
+
+    * **It is only sortable within a year.** `0102` sorts before `1231` regardless of
+      which year each one is, so a folder spanning New Year sorts wrong. Accepted: the
+      name is a label for the person who started the render, not an archive key.
+    * **It is no longer unique.** Two runs in the same minute produce the same name,
+      which for an auto-generated path used to be impossible. That one is *not* accepted,
+      because P5 promises an auto-generated name is a fresh output every run and the MP4
+      path derives its segment directory from it -- a collision would silently resume
+      somebody else's segments, possibly encoded with different settings. `unique_path`
+      below restores the promise.
 
     **Call this once per run and pass the result around.** A second call can land in the
-    next second, and for the MP4 path the name also determines the segment directory, so
+    next minute, and for the MP4 path the name also determines the segment directory, so
     two stamps in one job would scatter the segments across two places.
     """
-    return (when or datetime.datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return (when or datetime.datetime.now()).strftime("%m%d_%H%M")
+
+
+def unique_path(path: pathlib.Path) -> pathlib.Path:
+    """`path` if it is free, else the same name with `_2`, `_3`, ... before the suffix.
+
+    Only ever applied to an **auto-generated** path. An explicit `--out` is left exactly
+    as the user typed it, because reusing a path is how resume is asked for (P3) -- the
+    whole difference between the two is that one resumes and the other does not.
+
+    Minute-resolution stamps made the collision reachable: cancel a run, change a
+    setting, start again inside the same minute, and without this the second run would
+    adopt the first run's finished segments. Suffixing is the quiet fix; the alternative
+    -- refusing, or resuming with mismatched settings -- is worse in both directions.
+    """
+    if not path.exists():
+        return path
+    for n in itertools.count(2):
+        candidate = path.with_name(f"{path.stem}_{n}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise AssertionError("unreachable: itertools.count is infinite")
 
 
 def default_output_name(source: SourceSet, stamp: str) -> str:
-    """`<stem>_<date>_<time>.mp4` -- the naming the user asked for in P5.
+    """`<stem>_MMDD_HHMM.mp4` -- the naming the user asked for in P5.
 
     It replaced `<stem>.<first>-<last>.<WxH>.<codec>.mp4`, which said more about the
     render but could not tell two runs of the same command apart. A timestamp can, and
@@ -577,7 +613,7 @@ def default_output_name(source: SourceSet, stamp: str) -> str:
 
 
 def default_master_dir_name(source: SourceSet, stamp: str) -> str:
-    """`<stem>_<date>_<time>` -- the directory a frame-mode run fills (P5)."""
+    """`<stem>_MMDD_HHMM` -- the directory a frame-mode run fills (P5)."""
     return f"{source.stem}_{stamp}"
 
 

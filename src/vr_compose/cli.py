@@ -291,7 +291,8 @@ def cmd_master(
             source=chosen,
             rig=rig,
             frames=tuple(frames),
-            directory=args.out or pipeline.default_output_dir() / default_name,
+            directory=args.out
+            or pipeline.unique_path(pipeline.default_output_dir() / default_name),
             width=width,
             compress_level=args.compress_level,
             decode_workers=args.decode_workers,
@@ -469,7 +470,9 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             spec=spec,
             frames=tuple(frames),
             output=args.out
-            or pipeline.default_output_dir() / pipeline.default_output_name(chosen, stamp),
+            or pipeline.unique_path(
+                pipeline.default_output_dir() / pipeline.default_output_name(chosen, stamp)
+            ),
             segment_gops=args.segment_gops,
             decode_workers=args.decode_workers,
             warp_threads=args.warp_threads,
@@ -674,7 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=pathlib.Path,
         default=None,
         help="output .mp4, or the directory for --out-format png. Default: "
-        "<stem>_<date>_<time> beside the program -- a new name every run, so an "
+        "<stem>_MMDD_HHMM beside the program -- a new name every run, so an "
         "auto-named run does not resume; pass this explicitly to continue a previous one",
     )
     sequence.add_argument(

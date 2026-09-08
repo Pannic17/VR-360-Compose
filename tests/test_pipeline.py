@@ -510,21 +510,49 @@ def test_a_dead_encoder_is_a_failure_not_a_cancellation(
 
 def test_default_output_lands_beside_the_program(tmp_path: pathlib.Path) -> None:
     src = _fake_source(tmp_path, frames=(1, 2, 3))
-    assert pipeline.default_output_name(src, "20260908_163000") == "S_20260908_163000.mp4"
-    assert pipeline.default_master_dir_name(src, "20260908_163000") == "S_20260908_163000"
+    assert pipeline.default_output_name(src, "0908_1630") == "S_0908_1630.mp4"
+    assert pipeline.default_master_dir_name(src, "0908_1630") == "S_0908_1630"
     base = pipeline.default_output_dir()
     assert base.is_dir()
     assert (base / "pyproject.toml").exists(), "from source, the default is the project root"
 
 
-def test_the_run_stamp_is_sortable_and_filename_safe() -> None:
+def test_the_run_stamp_is_month_day_hour_minute() -> None:
+    """`MMDD_HHMM`, the width the user asked for on 2026-09-08."""
     stamp = pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 30, 5))
-    assert stamp == "20260908_163005"
+    assert stamp == "0908_1630"
     assert ":" not in stamp, "illegal in Windows filenames"
-    # lexical order is chronological, which is the point of the layout
-    later = pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 30, 6))
-    assert stamp < later
+    # Lexical order is chronological within one year, which is as far as a stamp with no
+    # year can go. Documented on `run_stamp` rather than papered over.
+    assert stamp < pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 31, 0))
     assert pipeline.run_stamp() != "", "the no-argument form reads the clock"
+
+
+def test_the_stamp_drops_the_seconds_so_a_minute_can_collide() -> None:
+    """The cost of `MMDD_HHMM`, asserted rather than assumed.
+
+    This is what `unique_path` exists to absorb: two runs in one minute would otherwise
+    be handed the same auto-generated name, and for the MP4 path the same segment
+    directory with it.
+    """
+    first = pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 30, 5))
+    second = pipeline.run_stamp(datetime.datetime(2026, 9, 8, 16, 30, 59))
+    assert first == second
+
+
+def test_unique_path_leaves_a_free_name_alone(tmp_path: pathlib.Path) -> None:
+    target = tmp_path / "S_0908_1630.mp4"
+    assert pipeline.unique_path(target) == target
+
+
+def test_unique_path_suffixes_past_whatever_is_there(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "S_0908_1630.mp4").write_bytes(b"")
+    assert pipeline.unique_path(tmp_path / "S_0908_1630.mp4").name == "S_0908_1630_2.mp4"
+    (tmp_path / "S_0908_1630_2.mp4").write_bytes(b"")
+    assert pipeline.unique_path(tmp_path / "S_0908_1630.mp4").name == "S_0908_1630_3.mp4"
+    # A frame-mode target is a directory, and a directory is just as taken as a file.
+    (tmp_path / "S_0908_1630").mkdir()
+    assert pipeline.unique_path(tmp_path / "S_0908_1630").name == "S_0908_1630_2"
 
 
 def test_refuses_to_start_on_a_full_disk(
