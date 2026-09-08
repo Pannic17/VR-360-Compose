@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>980</width><height>780</height></rect>
+  </property>
+  <property name="minimumSize">
+   <size><width>860</width><height>660</height></size>
+  </property>
+  <property name="windowTitle">
+   <string>VR-Compose</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="rootLayout">
+    <property name="spacing"><number>0</number></property>
+    <property name="leftMargin"><number>0</number></property>
+    <property name="topMargin"><number>0</number></property>
+    <property name="rightMargin"><number>0</number></property>
+    <property name="bottomMargin"><number>0</number></property>
+
+    <item>
+     <widget class="QFrame" name="headerFrame">
+      <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
+      <layout class="QHBoxLayout" name="headerLayout">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>20</number></property>
+       <property name="topMargin"><number>14</number></property>
+       <property name="rightMargin"><number>20</number></property>
+       <property name="bottomMargin"><number>14</number></property>
+       <item>
+        <widget class="QLabel" name="appTitleLabel">
+         <property name="text"><string>VR-Compose</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="rigBadgeLabel">
+         <property name="text"><string>rig —</string></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="headerSpacer">
+         <property name="orientation"><enum>Qt::Horizontal</enum></property>
+         <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QLabel" name="metaLabel">
+         <property name="text"><string>20 路方形帧 → 360° 等距圆柱全景</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="statusBannerLabel">
+         <property name="text"><string>就绪</string></property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+
+    <item>
+     <widget class="QWidget" name="bodyWidget">
+      <layout class="QVBoxLayout" name="bodyLayout">
+       <property name="spacing"><number>10</number></property>
+       <property name="leftMargin"><number>20</number></property>
+       <property name="topMargin"><number>16</number></property>
+       <property name="rightMargin"><number>20</number></property>
+       <property name="bottomMargin"><number>8</number></property>
+
+       <item>
+        <widget class="QLabel" name="configSectionTitleLabel">
+         <property name="text"><string>来源与输出</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QFrame" name="configCard">
+         <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
+         <layout class="QFormLayout" name="configFormLayout">
+          <property name="horizontalSpacing"><number>14</number></property>
+          <property name="verticalSpacing"><number>10</number></property>
+          <property name="leftMargin"><number>16</number></property>
+          <property name="topMargin"><number>14</number></property>
+          <property name="rightMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>14</number></property>
+          <property name="fieldGrowthPolicy"><enum>QFormLayout::AllNonFixedFieldsGrow</enum></property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="sourceLabel">
+            <property name="text"><string>来源目录</string></property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <layout class="QHBoxLayout" name="sourceRowLayout">
+            <property name="spacing"><number>8</number></property>
+            <item>
+             <widget class="QLineEdit" name="sourceLineEdit">
+              <property name="placeholderText"><string>留空则在程序所在目录按结构自动查找</string></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="browseSourceButton">
+              <property name="text"><string>浏览…</string></property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="stemLabel">
+            <property name="text"><string>场景 (stem)</string></property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QComboBox" name="stemComboBox"/>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="framesLabel">
+            <property name="text"><string>帧范围</string></property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QLineEdit" name="framesLineEdit">
+            <property name="placeholderText"><string>1656-2433 / 1656- / all</string></property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="outputLabel">
+            <property name="text"><string>输出位置</string></property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <layout class="QHBoxLayout" name="outputRowLayout">
+            <property name="spacing"><number>8</number></property>
+            <item>
+             <widget class="QLineEdit" name="outputLineEdit">
+              <property name="placeholderText"><string>留空则自动命名到程序目录（自动命名不续跑）</string></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="browseOutputButton">
+              <property name="text"><string>浏览…</string></property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <item>
+        <widget class="QLabel" name="optionSectionTitleLabel">
+         <property name="text"><string>参数</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QFrame" name="optionCard">
+         <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
+         <layout class="QGridLayout" name="optionGridLayout">
+          <property name="horizontalSpacing"><number>14</number></property>
+          <property name="verticalSpacing"><number>10</number></property>
+          <property name="leftMargin"><number>16</number></property>
+          <property name="topMargin"><number>14</number></property>
+          <property name="rightMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>14</number></property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="modeLabel">
+            <property name="text"><string>输出模式</string></property>
+           </widget>
+          </item>
+          <item row="0" column="1" colspan="5">
+           <layout class="QHBoxLayout" name="modeRowLayout">
+            <property name="spacing"><number>6</number></property>
+            <item>
+             <widget class="QRadioButton" name="videoRadioButton">
+              <property name="text"><string>视频（压缩交付）</string></property>
+              <property name="checked"><bool>true</bool></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QRadioButton" name="framesRadioButton">
+              <property name="text"><string>单帧（无损，按 input 尺寸）</string></property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="modeSpacer">
+              <property name="orientation"><enum>Qt::Horizontal</enum></property>
+              <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+             </spacer>
+            </item>
+           </layout>
+          </item>
+
+          <item row="1" column="0">
+           <widget class="QLabel" name="sizeLabel">
+            <property name="text"><string>交付尺寸</string></property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QComboBox" name="sizeComboBox"/>
+          </item>
+          <item row="1" column="2">
+           <widget class="QLabel" name="codecLabel">
+            <property name="text"><string>编码</string></property>
+           </widget>
+          </item>
+          <item row="1" column="3">
+           <widget class="QComboBox" name="codecComboBox"/>
+          </item>
+          <item row="1" column="4">
+           <widget class="QLabel" name="bitrateLabel">
+            <property name="text"><string>码率档</string></property>
+           </widget>
+          </item>
+          <item row="1" column="5">
+           <widget class="QComboBox" name="bitrateComboBox"/>
+          </item>
+
+          <item row="2" column="0">
+           <widget class="QLabel" name="fpsLabel">
+            <property name="text"><string>帧率</string></property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QComboBox" name="fpsComboBox"/>
+          </item>
+          <item row="2" column="2">
+           <widget class="QLabel" name="samplerLabel">
+            <property name="text"><string>采样器</string></property>
+           </widget>
+          </item>
+          <item row="2" column="3">
+           <widget class="QComboBox" name="samplerComboBox"/>
+          </item>
+          <item row="2" column="4">
+           <widget class="QLabel" name="bitDepthLabel">
+            <property name="text"><string>母版位深</string></property>
+           </widget>
+          </item>
+          <item row="2" column="5">
+           <widget class="QComboBox" name="bitDepthComboBox"/>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <item>
+        <widget class="QLabel" name="progressSectionTitleLabel">
+         <property name="text"><string>进度</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QFrame" name="progressCard">
+         <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
+         <layout class="QVBoxLayout" name="progressLayout">
+          <property name="spacing"><number>8</number></property>
+          <property name="leftMargin"><number>16</number></property>
+          <property name="topMargin"><number>14</number></property>
+          <property name="rightMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>14</number></property>
+          <item>
+           <widget class="QProgressBar" name="progressBar">
+            <property name="value"><number>0</number></property>
+            <property name="textVisible"><bool>false</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="progressDetailLabel">
+            <property name="text"><string>—</string></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <item>
+        <widget class="QLabel" name="logSectionTitleLabel">
+         <property name="text"><string>日志</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPlainTextEdit" name="logTextEdit">
+         <property name="readOnly"><bool>true</bool></property>
+         <property name="minimumSize"><size><width>0</width><height>150</height></size></property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+
+    <item>
+     <widget class="QWidget" name="buttonBar">
+      <layout class="QHBoxLayout" name="buttonLayout">
+       <property name="spacing"><number>10</number></property>
+       <property name="leftMargin"><number>20</number></property>
+       <property name="topMargin"><number>4</number></property>
+       <property name="rightMargin"><number>20</number></property>
+       <property name="bottomMargin"><number>16</number></property>
+       <item>
+        <spacer name="buttonSpacer">
+         <property name="orientation"><enum>Qt::Horizontal</enum></property>
+         <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QPushButton" name="discoverButton">
+         <property name="text"><string>重新检测</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="cancelButton">
+         <property name="text"><string>取消</string></property>
+         <property name="enabled"><bool>false</bool></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="startButton">
+         <property name="text"><string>开始</string></property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

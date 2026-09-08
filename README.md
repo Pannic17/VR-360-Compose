@@ -5,8 +5,8 @@
 
 仓库：<https://github.com/Pannic17/VR-360-Compose>
 
-**进度**：P0–P5 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质、
-输出命名与帧模式）。下一步 P6：GUI（PySide6）。
+**进度**：P0–P6 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质、
+输出命名与帧模式、GUI）。下一步 P7：交付合规与色彩管线调优。
 阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)。
 
 ---
@@ -43,6 +43,18 @@ py -3.13 -m venv .venv
 打包成独立 exe 是 ROADMAP 的 P8。
 
 ## 快速开始
+
+### 图形界面
+
+```powershell
+vr-compose-gui
+```
+
+选来源目录、选参数、点开始。进度、日志、取消都在窗口里；
+**作业跑在独立子进程**，所以界面不会卡，作业崩了也不会带走窗口。
+取消之后已完成的部分保留，把日志里那条输出路径填回「输出位置」就能续跑。
+
+### 命令行
 
 ```powershell
 vr-compose --source E:/22 discover
@@ -116,6 +128,8 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--no-resume` | | 忽略已完成的分段，全部重编 |
 | `--keep-segments` | | 合并后保留分段文件 |
 | `--no-bar` | | 不显示进度条，只输出普通日志行 |
+| `--progress-json` | | stdout 只输出 NDJSON 进度事件，人类可读的行改走 stderr。GUI 用的就是它，也可以拿来自己写脚本 |
+| `--cancel-on-stdin` | | 收到一行输入（或 stdin 到 EOF）就干净停止，已完成的部分保留、可续跑 |
 
 ## 两种输出模式
 
@@ -242,7 +256,7 @@ x264 在长分段上通常也逐字节一致，但末尾的短分段不保证；
 ## 开发
 
 ```powershell
-.venv/Scripts/python.exe -m pytest              # 253 个测试；几何/目录发现的测试不依赖真实数据
+.venv/Scripts/python.exe -m pytest              # 265 个测试；几何/目录发现的测试不依赖真实数据
 .venv/Scripts/python.exe -m ruff check .        # lint
 .venv/Scripts/python.exe -m ruff format .       # 格式
 .venv/Scripts/python.exe -m mypy                # strict，覆盖 src / tests / tools
@@ -265,7 +279,8 @@ src/vr_compose/
   verify.py       几何自检（指标 A）与环绕接缝检查
   memory.py       峰值内存测量与 64 GB 软上限告警
   io.py           读 tile（丢掉无用的 alpha）、写 PNG
-  cli.py          discover / frame / sequence
+  cli.py          discover / frame / sequence，以及 GUI 用的 NDJSON/取消接口
+  gui/            PySide6 窗口：window.py + main_window.ui + style.qss
 tests/            pytest；真实数据的检查单独标记，数据不在时自动跳过
 tools/            复现 AGENTS.md 每个数字的脚本
 ```

@@ -1,0 +1,353 @@
+/* VR-Compose. Palette, card idiom and the variant/status property trick are taken from
+   VR-Installer's ui/style.qss so the two tools look like siblings. Added here: the
+   progress card, QProgressBar, QSpinBox/QDoubleSpinBox and the disabled-input state,
+   because this window has controls that one does not. */
+
+QWidget {
+    background: #eef1f5;
+    color: #1f2328;
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+QLabel {
+    background: transparent;
+}
+
+QFrame#headerFrame {
+    background: #ffffff;
+    border: none;
+    border-bottom: 1px solid #dfe3e8;
+}
+
+QLabel#appTitleLabel {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+QLabel#rigBadgeLabel {
+    color: #2563eb;
+    background: #e8f0fe;
+    border: 1px solid #cfe0fd;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-family: "Consolas", monospace;
+    font-size: 14px;
+}
+
+QLabel#metaLabel,
+QLabel#progressDetailLabel {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+QLabel#statusBannerLabel {
+    font-size: 15px;
+    font-weight: 700;
+    border-radius: 14px;
+    padding: 6px 16px;
+}
+
+QLabel#statusBannerLabel[status="pending"] {
+    color: #b26a00;
+    background: #fff4e0;
+    border: 1px solid #f0dcb0;
+}
+
+QLabel#statusBannerLabel[status="running"] {
+    color: #1d4ed8;
+    background: #e8f0fe;
+    border: 1px solid #cfe0fd;
+}
+
+QLabel#statusBannerLabel[status="pass"] {
+    color: #16833a;
+    background: #e7f4ec;
+    border: 1px solid #bfe3ca;
+}
+
+QLabel#statusBannerLabel[status="fail"] {
+    color: #c62828;
+    background: #fdecea;
+    border: 1px solid #f3c9c4;
+}
+
+QLabel#configSectionTitleLabel,
+QLabel#optionSectionTitleLabel,
+QLabel#progressSectionTitleLabel,
+QLabel#logSectionTitleLabel {
+    color: #6b7280;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QFrame#configCard,
+QFrame#optionCard,
+QFrame#progressCard {
+    background: #ffffff;
+    border: 1px solid #dfe3e8;
+    border-radius: 10px;
+}
+
+QFrame#configCard QLabel,
+QFrame#optionCard QLabel,
+QFrame#progressCard QLabel {
+    color: #6b7280;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    background: #ffffff;
+    color: #1f2328;
+    border: 1px solid #cbd2da;
+    border-radius: 8px;
+    min-height: 34px;
+    padding: 0 10px;
+    selection-background-color: #cfe0fd;
+    font-weight: 400;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+    border: 1px solid #2563eb;
+}
+
+QLineEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled {
+    background: #f7f9fb;
+    color: #a5adb8;
+    border: 1px solid #e3e7ec;
+}
+
+QComboBox::drop-down {
+    width: 30px;
+    border: none;
+}
+
+QComboBox::down-arrow {
+    width: 0;
+    height: 0;
+}
+
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #1f2328;
+    border: 1px solid #dfe3e8;
+    selection-background-color: #e8f0fe;
+    selection-color: #1f2328;
+    outline: 0;
+}
+
+QSpinBox::up-button,
+QSpinBox::down-button,
+QDoubleSpinBox::up-button,
+QDoubleSpinBox::down-button {
+    width: 0;
+    border: none;
+}
+
+QRadioButton {
+    background: transparent;
+    color: #1f2328;
+    font-size: 14px;
+    font-weight: 600;
+    min-height: 34px;
+    max-height: 34px;
+    padding: 0 14px 0 0;
+    spacing: 8px;
+}
+
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QRadioButton::indicator:unchecked {
+    border: 1px solid #cbd2da;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+QRadioButton::indicator:unchecked:hover {
+    border: 1px solid #2563eb;
+    background: #eef4ff;
+}
+
+QRadioButton::indicator:checked {
+    border: 4px solid #ffffff;
+    border-radius: 8px;
+    background: #2563eb;
+}
+
+QRadioButton::indicator:checked:hover {
+    border: 4px solid #ffffff;
+    background: #1d4ed8;
+}
+
+QRadioButton:disabled {
+    color: #a5adb8;
+}
+
+QProgressBar {
+    background: #eef1f5;
+    border: 1px solid #dfe3e8;
+    border-radius: 7px;
+    min-height: 14px;
+    max-height: 14px;
+    text-align: center;
+    color: transparent;
+}
+
+QProgressBar::chunk {
+    background: #2563eb;
+    border-radius: 6px;
+}
+
+QProgressBar[state="done"]::chunk {
+    background: #16833a;
+}
+
+QProgressBar[state="fail"]::chunk {
+    background: #c62828;
+}
+
+QPlainTextEdit#logTextEdit {
+    background: #1e2530;
+    color: #c7d0da;
+    border: 1px solid #2b3442;
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    selection-background-color: #2f5fb0;
+}
+
+QWidget#buttonBar {
+    background: #eef1f5;
+}
+
+QPushButton {
+    min-width: 108px;
+    min-height: 42px;
+    max-height: 42px;
+    padding: 0 18px;
+    border-radius: 7px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid transparent;
+}
+
+QPushButton[variant="ghost"] {
+    background: #ffffff;
+    color: #6b7280;
+    border: 1px solid #cbd2da;
+}
+
+QPushButton[variant="ghost"]:hover {
+    background: #f7f9fb;
+    color: #1f2328;
+}
+
+QPushButton[variant="outline"] {
+    background: #ffffff;
+    color: #2563eb;
+    border: 1px solid #bcd3fb;
+}
+
+QPushButton[variant="outline"]:hover {
+    background: #eef4ff;
+    border: 1px solid #2563eb;
+}
+
+QPushButton[variant="primary"] {
+    background: #2563eb;
+    color: #ffffff;
+}
+
+QPushButton[variant="primary"]:hover {
+    background: #1d4ed8;
+}
+
+QPushButton[variant="primary"]:pressed {
+    background: #1e40af;
+}
+
+QPushButton#browseSourceButton,
+QPushButton#browseOutputButton {
+    min-width: 84px;
+    min-height: 34px;
+    max-height: 34px;
+    padding: 0 14px;
+    font-size: 13px;
+}
+
+QPushButton:disabled {
+    background: #f7f9fb;
+    color: #a5adb8;
+    border: 1px solid #dfe3e8;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background: #cbd2da;
+    border-radius: 5px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #aeb7c2;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QMessageBox {
+    background: #ffffff;
+}
+
+QMessageBox QLabel {
+    background: transparent;
+    color: #1f2328;
+    font-size: 14px;
+}
+
+QMessageBox QPushButton {
+    min-width: 84px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0 18px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #ffffff;
+    background: #2563eb;
+    border: 1px solid transparent;
+}
+
+QMessageBox QPushButton:hover {
+    background: #1d4ed8;
+}
+
+QMessageBox QPushButton:pressed {
+    background: #1e40af;
+}

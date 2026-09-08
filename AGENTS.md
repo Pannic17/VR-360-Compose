@@ -610,10 +610,30 @@ PySide6 + PyInstaller，Windows exe。以下数字来自 `tools/package_probe.py
 **许可**：带 libx264 / libx265 的 ffmpeg 构建是 GPL。此事已提出，
 **用户明确决定不处理 —— 这不是商业软件**。记录在此，不再作为待确认项。
 
-### GUI 架构要求
+### GUI 架构要求（P6 已实现）
+
+**实现落点**：`src/vr_compose/gui/`（`window.py` + `main_window.ui` + `style.qss`），
+入口 `vr-compose-gui` / `python -m vr_compose.gui`。
+样式与加载方式参考 `D:/VR-DEV/Python/VR-Installer/ui`（用户指定）：
+`.ui` 由 `QUiLoader` 运行时加载、`.qss` 用 `setStyleSheet`、`findChild` 按 objectName 绑定、
+`variant` / `status` 动态属性承载样式状态。
+
+**GUI 与引擎之间只有一条界面：CLI 的两个选项。** GUI 不 import 管线：
+
+- `--progress-json`：stdout 只走 NDJSON（`start`/`progress`/`log`/`done`/`cancelled`/`error`），
+  人类可读的行改走 stderr。**改动这些事件的字段名等于改了 GUI 的接口**，
+  `tests/test_gui.py` 里有不依赖 Qt 的断言守着。
+- `--cancel-on-stdin`：写一行即取消，**EOF 也算取消**（父进程没了）。
+  它设置的就是管线原本接受的那个 `threading.Event`，所以取消的保证没有第二套。
+
+窗口用 `QProcess` 在事件循环上读这条流，所以 GUI 侧没有任何线程。
+
+
 
 - **GUI 只能是薄壳。** 它必须调用 CLI 走的同一套代码，不允许出现第二份逻辑。
   先有可用的 CLI，GUI 包在外面。
+  **具体到「不许漂移」**：GUI 的下拉框内容来自 `encode.SIZES` / `encode.LADDER` /
+  `stitch.SAMPLERS` / `stitch.BIT_DEPTHS`，不在 `.ui` 里写死；有测试断言两边一致。
 - **长任务绝不能跑在 GUI 线程上。** 推荐把整个作业放到**独立子进程**里跑，
   GUI 通过管道读进度 —— 而不是只开个 QThread。这样既隔离崩溃，也避开
   Qt 与 multiprocessing 互相干扰的问题（P2 本来就有进程池和 ffmpeg 子进程）。

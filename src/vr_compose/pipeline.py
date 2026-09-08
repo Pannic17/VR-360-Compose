@@ -58,6 +58,7 @@ __all__ = [
     "Progress",
     "SequenceJob",
     "Summary",
+    "contiguous_tail",
     "parse_frames",
     "run_master",
     "run_sequence",
@@ -155,6 +156,27 @@ def parse_frames(text: str, available: Sequence[int]) -> list[int]:
     if not chosen:
         raise ValueError(f"no frames selected by {text!r}")
     return sorted(chosen)
+
+
+def contiguous_tail(frames: Sequence[int]) -> tuple[int, int]:
+    """`(first, last)` of the final run of consecutive frames.
+
+    The reference set is `0000` plus `1656..2433`: frames 1 to 1655 were consumed and
+    deleted by the previous pipeline, and `0000` is a leftover reference frame that is
+    not part of the sequence (AGENTS.md section 4). Rendering "everything" therefore
+    produces a video that jumps after its first frame, which is why the docs tell people
+    not to write `--frames all`.
+
+    Telling them is weaker than defaulting well, so this is what the GUI prefills. The
+    CLI's `all` still means all -- changing what an explicit word means would be worse
+    than the trap it avoids -- but both front ends can now reach the same answer.
+    """
+    if not frames:
+        raise ValueError("no frames to choose from")
+    index = len(frames) - 1
+    while index > 0 and frames[index - 1] == frames[index] - 1:
+        index -= 1
+    return frames[index], frames[-1]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

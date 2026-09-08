@@ -1,15 +1,31 @@
-"""Command-line entry point.
+"""Command-line entry point, and the machine-readable surface the GUI drives.
 
 The GUI in P6 must be a thin shell over exactly this code, so every operation lives in a
 library module and this file only parses arguments and prints. Nothing here hardcodes a
 source path: `--source` is optional and discovery fills it in (AGENTS.md §2, constraint 3).
+
+"Thin shell" is taken literally: the GUI does not import the pipeline, it **runs this
+CLI as a subprocess** (AGENTS.md §7 requires the job to be its own process, so a crash
+cannot take the window with it and Qt never shares an interpreter with the worker pools).
+Two options exist for that:
+
+* `--progress-json` puts one JSON object per line on **stdout** and moves every human
+  line to stderr, so the parent has a stream it can parse without scraping prose.
+* `--cancel-on-stdin` lets the parent stop the job by writing a line -- or simply by
+  closing the pipe, which also means "the GUI is gone, stop working". It sets the same
+  `threading.Event` the pipeline already takes, so cancellation stays one mechanism with
+  one set of guarantees (finished segments kept, no partial files, resumable).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
+import json
 import pathlib
 import sys
+import threading
 import time
 from collections.abc import Sequence
 
@@ -52,6 +68,44 @@ def _master_size(
     if width <= encode.SIZES[size][0]:
         return None
     return width, width // 2
+
+
+@dataclasses.dataclass(slots=True)
+class Reporter:
+    """Where a run's progress and prose go: a terminal, or a parent process.
+
+    In JSON mode stdout carries only NDJSON and prose goes to stderr, so a parent can
+    parse one stream while still showing the other. In terminal mode this is a no-op
+    wrapper and `print` behaves as it always did.
+    """
+
+    json: bool = False
+
+    def event(self, kind: str, /, **fields: object) -> None:
+        """`kind` is positional-only, so an event may also carry a `kind` field."""
+        if self.json:
+            print(json.dumps({"event": kind, **fields}, ensure_ascii=False), flush=True)
+
+    def say(self, text: str) -> None:
+        """A human line. Never stdout in JSON mode -- it would corrupt the stream."""
+        print(text, file=sys.stderr if self.json else sys.stdout, flush=self.json)
+
+
+def _watch_stdin_for_cancel(cancel: threading.Event) -> None:
+    """Set `cancel` when the parent says so, or when it goes away.
+
+    Any line means stop. So does EOF: if the parent closed the pipe it has either asked
+    for this or died, and in both cases finishing the render serves nobody. Daemon
+    thread, because a normal completion should not wait on a read that never returns.
+    """
+
+    def watch() -> None:
+        with contextlib.suppress(Exception):
+            for _line in sys.stdin:
+                break
+        cancel.set()
+
+    threading.Thread(target=watch, name="cancel-watch", daemon=True).start()
 
 
 def _resolve_source(explicit: pathlib.Path | None) -> source_mod.SourceSet:
@@ -253,14 +307,32 @@ def cmd_master(
         raise SystemExit(str(exc)) from None
 
     pending = job.pending_frames()
-    print(f"source     : {chosen.root}  stem {chosen.stem!r}")
-    print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
-    print(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
-    print(
+    report = Reporter(json=args.progress_json)
+    report.say(f"source     : {chosen.root}  stem {chosen.stem!r}")
+    report.say(
+        f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
+    )
+    report.say(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
+    report.say(
         f"master     : {width}x{width // 2} {job.bit_depth}-bit PNG at the input's own "
         f"density, lossless (zlib {job.compress_level}), sampler {job.sampler}"
     )
-    print(f"output     : {job.directory}")
+    report.say(f"output     : {job.directory}")
+    report.event(
+        "start",
+        mode="frames",
+        total=len(frames),
+        pending=len(pending),
+        first=frames[0],
+        last=frames[-1],
+        output=str(job.directory),
+        describe=f"{width}x{width // 2} {job.bit_depth}-bit PNG, lossless",
+        sampler=job.sampler,
+        baseline_seconds_per_frame=pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME,
+    )
+    cancel = threading.Event()
+    if args.cancel_on_stdin:
+        _watch_stdin_for_cancel(cancel)
 
     bar = tqdm(
         total=len(frames),
@@ -272,50 +344,85 @@ def cmd_master(
     )
     bar.update(len(frames) - len(pending))
 
-    def on_progress(report: pipeline.Progress) -> None:
-        bar.n = report.done
-        bar.set_postfix_str(f"{report.seconds_per_frame:.2f} s/frame", refresh=False)
+    def on_progress(progress: pipeline.Progress) -> None:
+        bar.n = progress.done
+        bar.set_postfix_str(f"{progress.seconds_per_frame:.2f} s/frame", refresh=False)
         bar.refresh()
+        speedup = (
+            pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / progress.seconds_per_frame
+            if progress.seconds_per_frame
+            else 0.0
+        )
+        report.event(
+            "progress",
+            done=progress.done,
+            total=progress.total,
+            frame=progress.frame,
+            segment=1,
+            segments=1,
+            seconds_per_frame=round(progress.seconds_per_frame, 3),
+            eta_seconds=round(progress.eta_seconds, 1),
+            speedup=round(speedup, 2),
+            skipped=progress.skipped,
+        )
 
     def on_log(message: str) -> None:
-        tqdm.write(f"           {message}")
+        if args.progress_json:
+            report.event("log", message=message)
+        else:
+            tqdm.write(f"           {message}")
 
     try:
-        summary = pipeline.run_master(job, progress=on_progress, log=on_log)
+        summary = pipeline.run_master(job, progress=on_progress, log=on_log, cancel=cancel)
     except pipeline.GeometryGateFailed as exc:
+        report.event("error", kind="geometry", message=str(exc))
         raise SystemExit(
             f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
         ) from None
     except (pipeline.Cancelled, KeyboardInterrupt) as exc:
         detail = f" ({exc})" if isinstance(exc, pipeline.Cancelled) else ""
+        report.event("cancelled", message=str(exc), output=str(job.directory))
         print(
             f"\ninterrupted{detail}; finished masters are kept. Re-run the same command to resume.",
             file=sys.stderr,
         )
         return 130
     except RuntimeError as exc:
+        report.event("error", kind="failure", message=str(exc))
         raise SystemExit(str(exc)) from None
     finally:
         bar.close()
 
-    print(f"\ndone       : {summary.written} master(s) -> {summary.directory}")
+    report.say(f"\ndone       : {summary.written} master(s) -> {summary.directory}")
     if summary.written:
-        print(
+        report.say(
             f"throughput : {summary.seconds_per_frame:.2f} s/frame, "
             f"{summary.bytes_per_frame / 2**20:.1f} MiB/frame "
             f"({summary.bytes_written / 2**30:.2f} GiB written)"
         )
-        print(f"stages     : {summary.stages.report()}")
+        report.say(f"stages     : {summary.stages.report()}")
     if summary.skipped:
-        print(f"resumed    : {summary.skipped} master(s) were already present")
+        report.say(f"resumed    : {summary.skipped} master(s) were already present")
     if summary.gate_reports:
-        worst = max(report.median for report in summary.gate_reports)
+        worst = max(gate.median for gate in summary.gate_reports)
         gates = len(summary.gate_reports)
-        print(f"geometry   : {gates} sampled frame(s) PASS, worst median {worst:.2f}")
+        report.say(f"geometry   : {gates} sampled frame(s) PASS, worst median {worst:.2f}")
     if summary.peak.measured:
-        print(f"memory     : {summary.peak.report()}")
+        report.say(f"memory     : {summary.peak.report()}")
     for warning in summary.warnings:
-        print(f"WARNING    : {warning}", file=sys.stderr)
+        report.say(f"WARNING    : {warning}")
+    report.event(
+        "done",
+        ok=True,
+        output=str(summary.directory),
+        frames=summary.frames,
+        written=summary.written,
+        skipped=summary.skipped,
+        seconds_per_frame=round(summary.seconds_per_frame, 3),
+        size_bytes=summary.bytes_written,
+        problems=[],
+        warnings=list(summary.warnings),
+    )
     return 0
 
 
@@ -375,15 +482,32 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
-    print(f"source     : {chosen.root}  stem {chosen.stem!r}")
-    print(f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files")
-    print(
+    report = Reporter(json=args.progress_json)
+    report.say(f"source     : {chosen.root}  stem {chosen.stem!r}")
+    report.say(
+        f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
+    )
+    report.say(
         f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), "
         f"{len(job.segments())} segment(s) of up to {job.segment_frames}"
     )
-    print(f"sampler    : {args.sampler}")
-    print(f"encode     : {spec.describe()}")
-    print(f"output     : {job.output}")
+    report.say(f"sampler    : {args.sampler}")
+    report.say(f"encode     : {spec.describe()}")
+    report.say(f"output     : {job.output}")
+    report.event(
+        "start",
+        mode="video",
+        total=len(frames),
+        first=frames[0],
+        last=frames[-1],
+        output=str(job.output),
+        describe=spec.describe(),
+        sampler=args.sampler,
+        baseline_seconds_per_frame=pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME,
+    )
+    cancel = threading.Event()
+    if args.cancel_on_stdin:
+        _watch_stdin_for_cancel(cancel)
 
     bar = tqdm(
         total=len(frames),
@@ -394,33 +518,52 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         mininterval=1.0,
     )
 
-    def on_progress(report: pipeline.Progress) -> None:
-        bar.n = report.done
+    def on_progress(progress: pipeline.Progress) -> None:
+        bar.n = progress.done
         speedup = (
-            pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / report.seconds_per_frame
-            if report.seconds_per_frame
+            pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / progress.seconds_per_frame
+            if progress.seconds_per_frame
             else 0.0
         )
         bar.set_postfix_str(
-            f"seg {report.segment + 1}/{report.segments}  "
-            f"{report.seconds_per_frame:.2f} s/frame  {speedup:.1f}x vs 46.85",
+            f"seg {progress.segment + 1}/{progress.segments}  "
+            f"{progress.seconds_per_frame:.2f} s/frame  {speedup:.1f}x vs 46.85",
             refresh=False,
         )
         bar.refresh()
+        report.event(
+            "progress",
+            done=progress.done,
+            total=progress.total,
+            frame=progress.frame,
+            segment=progress.segment + 1,
+            segments=progress.segments,
+            seconds_per_frame=round(progress.seconds_per_frame, 3),
+            eta_seconds=round(progress.eta_seconds, 1),
+            speedup=round(speedup, 2),
+            skipped=progress.skipped,
+        )
 
     def on_log(message: str) -> None:
-        # tqdm.write keeps the bar intact; a bare print would smear it
-        tqdm.write(f"           {message}")
+        # One channel each, or a parent showing both would print every line twice: in
+        # JSON mode these go out as events, and the header lines above stay on stderr.
+        if args.progress_json:
+            report.event("log", message=message)
+        else:
+            # tqdm.write keeps the bar intact; a bare print would smear it
+            tqdm.write(f"           {message}")
 
     try:
-        summary = pipeline.run_sequence(job, progress=on_progress, log=on_log)
+        summary = pipeline.run_sequence(job, progress=on_progress, log=on_log, cancel=cancel)
     except pipeline.GeometryGateFailed as exc:
+        report.event("error", kind="geometry", message=str(exc))
         raise SystemExit(
             f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
         ) from None
     # Cancelled is a RuntimeError, so it has to be caught before the failure branch below.
     except (pipeline.Cancelled, KeyboardInterrupt) as exc:
         detail = f" ({exc})" if isinstance(exc, pipeline.Cancelled) else ""
+        report.event("cancelled", message=str(exc), output=str(job.output))
         print(
             f"\ninterrupted{detail}; finished segments are kept. "
             "Re-run the same command to resume.",
@@ -428,42 +571,53 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         )
         return 130
     except (encode.FfmpegNotFound, RuntimeError) as exc:
+        report.event("error", kind="failure", message=str(exc))
         raise SystemExit(str(exc)) from None
     finally:
         bar.close()
 
     size_mib = summary.output.stat().st_size / 2**20
-    print(f"\ndone       : {summary.frames} frames -> {summary.output} ({size_mib:.0f} MiB)")
+    report.say(f"\ndone       : {summary.frames} frames -> {summary.output} ({size_mib:.0f} MiB)")
     if summary.encoded:
         speedup = pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / summary.seconds_per_frame
-        print(
+        report.say(
             f"throughput : {summary.seconds_per_frame:.2f} s/frame over {summary.encoded} "
             f"encoded frame(s) ({speedup:.1f}x vs the previous pipeline's 46.85)"
         )
-    if summary.encoded:
-        print(f"stages     : {summary.stages.report()}")
+        report.say(f"stages     : {summary.stages.report()}")
     if summary.peak.measured:
-        print(f"memory     : {summary.peak.report()}")
+        report.say(f"memory     : {summary.peak.report()}")
     if summary.skipped_segments:
-        print(f"resumed    : {summary.skipped_segments} segment(s) were already complete")
+        report.say(f"resumed    : {summary.skipped_segments} segment(s) were already complete")
     gates = summary.gate_reports
     if gates:
-        worst = max(report.median for report in gates)
-        print(f"geometry   : {len(gates)} sampled frame(s) PASS, worst median {worst:.2f}")
+        worst = max(gate.median for gate in gates)
+        report.say(f"geometry   : {len(gates)} sampled frame(s) PASS, worst median {worst:.2f}")
     stream = summary.stream
-    print(
+    report.say(
         f"stream     : {stream.codec} {stream.profile} L{stream.level} {stream.tag} "
         f"{stream.width}x{stream.height} {stream.pix_fmt} B={stream.b_frames} "
         f"I-gap={list(stream.i_intervals)} {stream.bitrate_mbps:.1f} Mbps"
     )
     for warning in summary.warnings:
-        print(f"WARNING    : {warning}", file=sys.stderr)
+        report.say(f"WARNING    : {warning}")
+    report.event(
+        "done",
+        ok=not summary.problems,
+        output=str(summary.output),
+        frames=summary.frames,
+        encoded=summary.encoded,
+        seconds_per_frame=round(summary.seconds_per_frame, 3),
+        size_bytes=summary.output.stat().st_size,
+        problems=list(summary.problems),
+        warnings=list(summary.warnings),
+    )
     if summary.problems:
-        print("CONFORMANCE PROBLEMS:")
+        report.say("CONFORMANCE PROBLEMS:")
         for problem in summary.problems:
-            print(f"  - {problem}")
+            report.say(f"  - {problem}")
         return 1
-    print("conformance: OK")
+    report.say("conformance: OK")
     return 0
 
 
@@ -585,6 +739,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence.add_argument("--stats-every", type=int, default=100, help="geometry gate cadence")
     sequence.add_argument("--no-bar", action="store_true", help="plain log lines, no tqdm bar")
+    sequence.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="one JSON object per line on stdout (start / progress / log / done / "
+        "cancelled / error), with every human line moved to stderr. This is the surface "
+        "the GUI reads; it is stable enough to script against",
+    )
+    sequence.add_argument(
+        "--cancel-on-stdin",
+        action="store_true",
+        help="stop cleanly when a line arrives on stdin, or when stdin reaches EOF -- "
+        "which also covers 'the parent process is gone'. Finished work is kept and the "
+        "job stays resumable, exactly as with Ctrl-C",
+    )
     sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
     sequence.add_argument("--keep-segments", action="store_true")
     sequence.add_argument(
