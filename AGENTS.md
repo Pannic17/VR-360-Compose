@@ -991,9 +991,11 @@ windowed 的副作用是好的那种：未捕获异常弹**对话框**，而不�
 
 **为什么做了**：P4 把默认采样器换成 catmullrom 之后，8K warp 从 1.84 s 变成 **11.0 s/帧**
 （16 个 gather），778 帧母版约 2.4 小时。warp 的形状（静态 LUT + 每帧一次 gather/加权累加）正是
-GPU 擅长的。**规则由用户定（2026-09-09）**：默认 `cpu`；GPU 只能从命令行 `--device cuda` 打开，
-GUI 不暴露；没有 NVIDIA 卡、`cupy` 没装、或显存**低于 12 GB（十进制）**时打 Warning 回退 CPU，
-作业照常跑（最初定 16 GB，用户同日降到 12 GB）。用十进制是因为标称 12 GB 的卡驱动报 12 282 MiB
+GPU 擅长的。**规则由用户定（2026-09-09）**：库与 CLI 默认 `cpu`；`--device cuda` 明确要 GPU，
+没有 NVIDIA 卡、`cupy` 没装、或显存**低于 12 GB（十进制）**时打 Warning 回退 CPU，作业照常跑
+（最初定 16 GB，用户同日降到 12 GB）；**GUI 固定发 `--device auto`**，同一道门禁，过了用 GPU，
+没过**静默**走 CPU——只在日志里写一行原因，不进 warnings，因为用户没有要求过什么。GUI 里没有开关
+（最初的规则是 GUI 完全不碰 GPU，用户同日改成 auto）。用十进制是因为标称 12 GB 的卡驱动报 12 282 MiB
 （略小于 12 GiB），它必须过关；8K 的 plan 加权重加缓冲占 4.6 GB，12 GB 有余量。
 
 **实现**（`vr_compose.device` 门禁、`vr_compose.warp_gpu` 核函数；`tools/gpu_probe.py` 是探针也是原型）：
@@ -1465,5 +1467,6 @@ GPL 许可问题用户明确决定不处理（非商业软件）；
    约 1.2/255 的压暗 —— ffmpeg 那条路会（已实测），头显里常见的 GPU shader 路一般不会。
    **只能在真机上看一眼亮度。**
 2. ~~**GPU 加速做不做、何时做**~~ **已做**（2026-09-09，第 8 节「GPU 加速」）：`--device cuda`，
-   仅命令行，无卡或显存小于 12 GB 时 Warning 回退 CPU；与 CPU 逐字节一致，指标 D 不用改容差。
+   CLI 默认 cpu，GUI 固定 auto；`cuda` 无卡或显存小于 12 GB 时 Warning 回退 CPU，`auto` 静默回退；
+   与 CPU 逐字节一致，指标 D 不用改容差。
    发布 exe **不带** cupy（PyInstaller spec 显式 exclude）——GPU 路径是源码运行的开发机用的。

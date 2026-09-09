@@ -42,6 +42,32 @@ def test_a_qualifying_gpu_is_used_and_named() -> None:
     assert "RTX 4090" in placed.detail and "24.0 GB" in placed.detail
 
 
+def test_auto_takes_a_qualifying_gpu() -> None:
+    placed = resolve_device("auto", probe=lambda: probe_with(name="NVIDIA GeForce RTX 4090"))
+    assert placed.device == "cuda" and placed.warning is None and placed.note == ""
+
+
+@pytest.mark.parametrize(
+    "found",
+    [
+        CudaProbe(importable=False, error="ModuleNotFoundError: cupy"),
+        CudaProbe(importable=True, error="CUDARuntimeError: no driver"),
+        CudaProbe(importable=True, count=0),
+        CudaProbe(importable=True, count=1, name="Small GPU", total_bytes=8 * GB),
+    ],
+)
+def test_auto_takes_the_cpu_quietly_when_the_gate_says_no(found: CudaProbe) -> None:
+    """Rule 4: the GUI asked for nothing in particular, so this is a note, not a warning."""
+    placed = resolve_device("auto", probe=lambda: found)
+    assert placed.device == "cpu"
+    assert placed.warning is None and not placed.fell_back
+    assert placed.note and placed.note.endswith("; using the CPU")
+    # the same reason a `cuda` request would have been warned with
+    warned = resolve_device("cuda", probe=lambda: found)
+    assert warned.warning is not None
+    assert placed.note.removesuffix("; using the CPU") in warned.warning
+
+
 def test_missing_cupy_warns_and_falls_back() -> None:
     placed = resolve_device(
         "cuda", probe=lambda: CudaProbe(importable=False, error="ModuleNotFoundError: cupy")

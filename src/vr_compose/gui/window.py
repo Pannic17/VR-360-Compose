@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from vr_compose import __version__, encode, pipeline
 from vr_compose import source as source_mod
+from vr_compose.device import GUI_DEVICE
 from vr_compose.rig import UnknownRigError, rig_for
 from vr_compose.stitch import BIT_DEPTHS, DEFAULT_SAMPLER, SAMPLERS
 
@@ -347,6 +348,10 @@ class ComposeWindow(QMainWindow):
             frames,
             "--sampler",
             self.sampler_combo.currentText(),
+            # The GUI has no device control (user, 2026-09-09): it asks for the fastest
+            # device the machine has, and the CLI falls back to the CPU quietly.
+            "--device",
+            GUI_DEVICE,
             "--no-bar",
             "--progress-json",
             "--cancel-on-stdin",

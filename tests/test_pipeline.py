@@ -654,13 +654,13 @@ def test_a_card_below_the_floor_warns_with_its_size(
 ) -> None:
     from vr_compose import device
 
-    small = device.CudaProbe(importable=True, count=1, name="Small GPU", total_bytes=12 * 10**9)
+    small = device.CudaProbe(importable=True, count=1, name="Small GPU", total_bytes=8 * 10**9)
     monkeypatch.setattr(device, "probe_cuda", lambda: small)
     summary = pipeline.run_sequence(
         _job(moving_source, tmp_path / "out.mp4", device="cuda", frames=FRAMES[:60])
     )
     assert summary.device == "cpu"
-    assert summary.warnings and "Small GPU has 12.0 GB" in summary.warnings[0]
+    assert summary.warnings and "Small GPU has 8.0 GB" in summary.warnings[0]
 
 
 @needs_ffmpeg
@@ -751,3 +751,22 @@ def test_decode_workers_default_follows_the_device_the_warp_landed_on(
     assert seen and set(seen) == {4}
     with pytest.raises(ValueError, match="decode_workers must be"):
         _job(moving_source, tmp_path / "out2.mp4", decode_workers=0)
+
+
+@needs_ffmpeg
+def test_auto_without_a_gpu_runs_on_the_cpu_with_a_note_not_a_warning(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the GUI sends. Nothing was demanded, so a machine without a GPU sees a log line
+    saying why the CPU was used and no warning at all (user, 2026-09-09)."""
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "probe_cuda", lambda: device.CudaProbe(importable=True, count=0))
+    said: list[str] = []
+    summary = pipeline.run_sequence(
+        _job(moving_source, tmp_path / "auto.mp4", device="auto", frames=FRAMES[:60]),
+        log=said.append,
+    )
+    assert summary.device == "cpu" and summary.warnings == () and summary.problems == ()
+    assert any(line.startswith("warp on the CPU: no CUDA device") for line in said)
+    assert not any(line.startswith("WARNING") for line in said)

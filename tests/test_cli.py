@@ -392,6 +392,7 @@ def test_device_is_a_cli_option_defaulting_to_cpu() -> None:
         args = parser.parse_args([sub])
         assert args.device == "cpu", sub
         assert parser.parse_args([sub, "--device", "cuda"]).device == "cuda"
+        assert parser.parse_args([sub, "--device", "auto"]).device == "auto"
     with pytest.raises(SystemExit):
         parser.parse_args(["sequence", "--device", "opencl"])
 

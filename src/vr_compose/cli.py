@@ -212,6 +212,8 @@ def cmd_frame(args: argparse.Namespace) -> int:
     placement = device_mod.resolve_device(args.device)
     if placement.fell_back:
         print(f"WARNING    : {placement.warning}")
+    elif placement.note:
+        print(f"warp       : cpu ({placement.note})")
     if placement.device == "cuda":
         # The plan is the verified geometry evaluated once; the GPU only applies it. Same
         # bytes as `stitch_frame` -- tests/test_warp_gpu.py holds that line.
@@ -260,7 +262,8 @@ def _describe_device(device: str, detail: str) -> str:
 DEVICE_HELP = (
     "where the warp runs. 'cpu' (default) is the byte-exact reference; 'cuda' gives the "
     "same bytes from an NVIDIA GPU with at least 12 GB (needs `pip install "
-    "vr-compose[gpu]`). Without such a GPU the run warns and uses the CPU"
+    "vr-compose[gpu]`) and warns and uses the CPU without one; 'auto' (what the GUI "
+    "sends) takes such a GPU when present and the CPU otherwise, quietly"
 )
 
 DELIVERY_ONLY = (

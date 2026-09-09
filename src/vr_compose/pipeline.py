@@ -400,14 +400,19 @@ def _place_plan(
     """Put the plan where the job asked, or where it can go, and say which.
 
     A `cuda` request that cannot be served -- no card, a small card, `cupy` missing, or
-    the upload itself failing -- is a warning and a CPU run, never a refusal. The CPU
-    plan is the reference implementation, so nothing is lost but time.
+    the upload itself failing -- is a warning and a CPU run, never a refusal. `auto` (the
+    GUI) takes the CPU with a log note and no warning when the gate says no; a card that
+    passed the gate and then refused the upload is still a warning, because something is
+    actually wrong. The CPU plan is the reference implementation, so nothing is lost but
+    time.
     """
     placement = device_mod.resolve_device(requested)
     if placement.fell_back:
         assert placement.warning is not None
         warnings.append(placement.warning)
         say(f"WARNING: {placement.warning}")
+    elif placement.note:
+        say(f"warp on the CPU: {placement.note}")
     if placement.device != "cuda":
         return plan, placement
     from vr_compose import warp_gpu
@@ -416,8 +421,8 @@ def _place_plan(
         gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
     except Exception as error:
         warning = (
-            f"GPU requested (--device cuda) but the warp plan could not be placed on "
-            f"{placement.detail}; falling back to the CPU. [{type(error).__name__}: {error}]"
+            f"the warp plan could not be placed on {placement.detail}; falling back to the "
+            f"CPU. [{type(error).__name__}: {error}]"
         )
         warnings.append(warning)
         say(f"WARNING: {warning}")

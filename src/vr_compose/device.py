@@ -2,10 +2,9 @@
 
 The CPU path is the byte-exact reference implementation (AGENTS.md section 9, metric D);
 the GPU path in :mod:`vr_compose.warp_gpu` reproduces it bit for bit but exists on one
-kind of hardware. Three rules, set by the user on 2026-09-09:
+kind of hardware. Four rules, set by the user on 2026-09-09:
 
-1. The default is `cpu`. The GPU is opt-in from the command line (`--device cuda`); the
-   GUI does not offer it, and nothing in the library switches to it on its own.
+1. The library and CLI default is `cpu`. `cuda` asks for the GPU explicitly.
 2. Asking for `cuda` on a machine that cannot serve it is a **warning, not an error**:
    the job falls back to the CPU and runs. No NVIDIA driver, no `cupy`, no device, or a
    device with less than 12 GB of memory all take that path (16 GB until the user lowered
@@ -13,6 +12,10 @@ kind of hardware. Three rules, set by the user on 2026-09-09:
 3. The 12 GB floor is measured in decimal gigabytes. A card sold as "12 GB" reports
    about 12 282 MiB (a little under 12 GiB), and it must pass; an 8 or 11 GB card must
    not. The plan and its weights need about 4.6 GB at 8K, so 12 GB leaves room.
+4. `auto` -- what the GUI sends -- takes the GPU when the same gate passes and the CPU
+   otherwise, **quietly**: nothing was asked for that failed, so the reason goes into the
+   log as a note, not into the run's warnings. The GUI has no switch; it just gets the
+   fastest device the machine has.
 
 The probe is injectable so the gate can be tested without a GPU, and without `cupy`.
 """
@@ -25,6 +28,7 @@ from collections.abc import Callable
 __all__ = [
     "DEFAULT_DEVICE",
     "DEVICES",
+    "GUI_DEVICE",
     "MIN_CUDA_MEMORY_BYTES",
     "CudaProbe",
     "Placement",
@@ -32,8 +36,10 @@ __all__ = [
     "resolve_device",
 ]
 
-DEVICES = ("cpu", "cuda")
+DEVICES = ("cpu", "cuda", "auto")
 DEFAULT_DEVICE = "cpu"
+GUI_DEVICE = "auto"
+"""What the GUI asks for (rule 4). The GUI has no device control; this is the policy."""
 MIN_CUDA_MEMORY_BYTES = 12 * 10**9
 """Decimal on purpose; see rule 3 in the module docstring."""
 
@@ -58,10 +64,13 @@ class Placement:
     """The decision: which device the warp will actually run on, and why if not asked."""
 
     device: str
+    """`cpu` or `cuda` -- never `auto`; that has been decided by now."""
     warning: str | None = None
     """Set when `cuda` was requested and the CPU is used instead. Advisory."""
     detail: str = ""
     """For the log: the GPU's name and memory when `device` is `cuda`."""
+    note: str = ""
+    """Set when `auto` chose the CPU: why, for the log. Not a warning (rule 4)."""
 
     @property
     def fell_back(self) -> bool:
@@ -111,24 +120,31 @@ def resolve_device(
     found = (probe or probe_cuda)()
     if minimum_bytes is None:
         minimum_bytes = MIN_CUDA_MEMORY_BYTES
-    prefix = "GPU requested (--device cuda) but "
+    reason = _why_not(found, minimum_bytes)
+    if reason is None:
+        return Placement(device="cuda", detail=found.describe)
+    if requested == "auto":
+        return Placement(device="cpu", note=f"{reason}; using the CPU")
+    return Placement(
+        device="cpu",
+        warning=f"GPU requested (--device cuda) but {reason}; falling back to the CPU.",
+    )
+
+
+def _why_not(found: CudaProbe, minimum_bytes: int) -> str | None:
+    """The gate. `None` means the GPU may be used; otherwise the reason it may not."""
     if not found.importable:
-        why = (
+        return (
             "cupy is not installed or the NVIDIA driver is missing "
-            "(pip install 'vr-compose[gpu]' on a machine with an NVIDIA card)"
+            f"(pip install 'vr-compose[gpu]' on a machine with an NVIDIA card) [{found.error}]"
         )
-        return Placement("cpu", f"{prefix}{why}; falling back to the CPU. [{found.error}]")
     if found.error:
-        return Placement(
-            "cpu",
-            f"{prefix}CUDA could not be initialised; falling back to the CPU. [{found.error}]",
-        )
+        return f"CUDA could not be initialised [{found.error}]"
     if found.count == 0:
-        return Placement("cpu", f"{prefix}no CUDA device was found; falling back to the CPU.")
+        return "no CUDA device was found"
     if found.total_bytes < minimum_bytes:
-        return Placement(
-            "cpu",
-            f"{prefix}{found.name} has {found.total_bytes / 1e9:.1f} GB of memory, below the "
-            f"{minimum_bytes / 1e9:.0f} GB floor; falling back to the CPU.",
+        return (
+            f"{found.name} has {found.total_bytes / 1e9:.1f} GB of memory, below the "
+            f"{minimum_bytes / 1e9:.0f} GB floor"
         )
-    return Placement(device="cuda", detail=found.describe)
+    return None
