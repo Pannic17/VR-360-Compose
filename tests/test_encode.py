@@ -144,11 +144,21 @@ def test_h265_args_pin_level_and_tier() -> None:
     assert "level-idc=5.1" in four_k and "high-tier=0" in four_k
 
 
-def test_range_flag_follows_the_spec() -> None:
+def test_the_range_tag_and_the_conversion_always_agree() -> None:
+    """Both switches or neither -- disagreeing between them is the way to ruin a file.
+
+    The scale filter decides what the samples *are* and `-color_range` decides what the
+    file *claims*. Set one without the other and every player is wrong: the picture comes
+    back washed out or with its shadows and highlights clipped, and nothing in the
+    encoder complains. Limited is what ships (`full_range` defaults to False and is a
+    reserved path; see its docstring), so this checks the pairing in both directions.
+    """
     limited = _joined(EncodeSpec(4096, 2048, "h264", 50_000, 30).video_args())
     assert "-color_range tv" in limited and "out_range=limited" in limited
+    assert "out_range=full" not in limited, "the delivery must not claim tv and carry pc"
     full = _joined(EncodeSpec(4096, 2048, "h264", 50_000, 30, full_range=True).video_args())
     assert "-color_range pc" in full and "out_range=full" in full
+    assert "out_range=limited" not in full
 
 
 def test_input_args_describe_raw_rgb_on_stdin() -> None:

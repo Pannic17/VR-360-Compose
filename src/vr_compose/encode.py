@@ -230,6 +230,26 @@ class EncodeSpec:
     fps: int
     preset: str = "medium"
     full_range: bool = False
+    """Keep the stitcher's 0-255 instead of squeezing it into 16-235. **A reserved path.**
+
+    Full range measured **+0.34 dB** (43.55 against 43.21) and costs no bits at all --
+    about what doubling the bitrate buys, 100 to 200 Mbps being +0.39 dB. It is off
+    anyway, because the risk is asymmetric rather than because the gain is small:
+    `video_full_range_flag` **defaults to limited** in the bitstream, so if the tag is
+    ever dropped or ignored -- a transcode, an editor, a lazy player -- a limited file is
+    guessed *correctly*, while a full-range file gets stretched as though it were 16-235
+    and everything below 16 and above 235 is **clipped away**. On this footage, which is
+    saturated lava with a lot of highlights, that is crushed shadows and burnt highlights,
+    and it is not recoverable.
+
+    So this stays `False` and neither the CLI nor the GUI exposes it (the user's decision,
+    2026-09-09: keep it available, do not ship it). Two things to know before flipping it:
+    limited is *not* in the delivery spec the user gave -- that table stops at container,
+    codec, FourCC, profile, 4:2:0 8-bit, B=0, GOP and no audio -- it is broadcast
+    convention and ffmpeg's default; and the whole risk lives in the player, so a build
+    that turns this on has to be checked on the target headset, looking at deep shadows
+    and clipped highlights rather than at a PSNR figure.
+    """
     master: tuple[int, int] | None = None
     """The size the stitcher renders, when it differs from the delivery size.
 
