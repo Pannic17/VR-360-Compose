@@ -446,7 +446,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         raise SystemExit(
             "EXR masters are not implemented: the source is 8-bit PNG, so an EXR would "
             "carry no more information than the PNG master does. The interface is "
-            "reserved for a 16-bit source (AGENTS.md §11, item 5). Use --out-format png."
+            "reserved for a 16-bit source, which needs a change upstream that is not "
+            "available (UPSTREAM.md, item 3). Use --out-format png."
         )
     if args.out_format == "png":
         return cmd_master(args, chosen, rig, frames, stamp)

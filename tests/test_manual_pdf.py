@@ -65,7 +65,8 @@ def test_the_manual_renders_to_a_plausible_document() -> None:
     assert html.count("<h1>") == 1
     # 你拿到的是, 来源与输出, 输出模式, 参数, 大概要跑多久, 出问题怎么看
     assert html.count("<table>") == 6, "one per table in the manual"
-    assert html.count("<pre>") == 2
+    # 产物叫什么, 播放器怎么知道这是个 360 视频, 命令行工具 (示例 + PowerShell 的那条)
+    assert html.count("<pre>") == 4
     assert "<thead>" in html and "<tbody>" in html
     assert "<img" not in html and "<a " not in html
 

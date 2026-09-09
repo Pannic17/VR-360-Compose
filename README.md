@@ -5,9 +5,11 @@
 
 仓库：<https://github.com/Pannic17/VR-360-Compose>
 
-**进度**：P0–P6 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质、
-输出命名与帧模式、GUI）。下一步 P7：交付合规与色彩管线调优。
-阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)。
+**进度**：P0–P8 已完成（rig 反解、单帧正确、序列吞吐 + 直出 MP4、收尾与母版 sink、画质、
+输出命名与帧模式、GUI、交付合规与色彩管线、打包 exe）。
+**只剩两件验收**：打包版跑完整一版 + 真机播放看一眼亮度；干净机器上解压即跑。
+阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)；
+上游（UE 侧）不可修改，能改时值得做的事记在 [UPSTREAM.md](UPSTREAM.md)。
 
 ---
 
@@ -49,7 +51,17 @@ python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --onefile    # dist/onefile/VR-
 ```
 
 差别只在 ffmpeg 放哪儿：文件夹版摆在 exe 同级，单文件版打进包里。
-文件夹版启动约 0.4 秒，单文件版每次启动都要把约 494 MiB 解到 `%TEMP%`。
+文件夹版启动约 0.4 秒，单文件版每次启动都要把约 494 MiB 解到 `%TEMP%` ——
+**体积和启动耗时都不是判据**（用户 2026-09-09：分发包大小不重要，能打开能跑就行），
+这些数字写在这里只是让你知道会发生什么。
+
+**还有一处差别，是双击时那个黑窗口逼出来的**（2026-09-09 实测）：
+**单文件版是 windowed 构建，没有自己的控制台** —— 它的控制台是 bootloader 开的，
+在本项目代码跑起来之前就在屏幕上，解包多久它就亮多久，事后藏起来还留个任务栏按钮。
+**文件夹版保留控制台**并在双击时自己藏掉（0.35 秒启动，实测闪约 1–2 秒），
+换来的是 **PowerShell 会等一个控制台程序**：windowed 的 exe 在 PowerShell 里裸跑
+`--version` 不打印也不给退出码（管道、`cmd`、`Start-Process -Wait` 都正常）。
+所以**要写脚本就用文件夹版或源码**，要双击就用单文件版。
 两种都自带中文说明（`.md` 与构建时现排的 `.pdf`）。
 构建后的校验（跑打包好的 exe、与源码逐字节比对）是 `--smoke`，**默认关闭** ——
 打包和写文档的时候不该等它。
@@ -147,6 +159,7 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--decode-workers` | `4` | 解码线程；**多于 4 会拖慢 warp**（GIL 争用，实测） |
 | `--warp-threads` | `8` | 重投影线程 |
 | `--encoder-threads` | 不设 | 给编码器的线程上限，用来压它的内存：不设时整机峰值约 24 GiB、最快；给 16 降到约 10 GiB，吞吐掉 4%。只是脚印旋钮，**不影响可复现性** |
+| `--no-spherical` | | 不写 360 元数据。写出来的文件在播放器里就是个 2:1 的平面视频，**只用于排查** |
 | `--no-resume` | | 忽略已完成的分段，全部重编 |
 | `--keep-segments` | | 合并后保留分段文件 |
 | `--no-bar` | | 不显示进度条，只输出普通日志行 |
@@ -171,8 +184,18 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 这时候 `--codec / --bitrate / --fps / --size` 之类会**明确报错**而不是被忽略。
 
 **输出规格**（用户确认的交付规格，全部由 `ffprobe` 逐项校验）：MP4 容器、`avc1` / `hvc1`、
-High / Main profile、`yuv420p` 8-bit 4:2:0、**只有 I 帧和 P 帧（B=0）**、闭合 GOP 2 秒、无音轨。
+High / Main profile、`yuv420p` 8-bit 4:2:0 limited range / BT.709、
+**只有 I 帧和 P 帧（B=0）**、闭合 GOP 2 秒、无音轨、**带 Spherical Video V2 元数据**。
 level 由规范表算出最小合规值，不交给编码器（编码器自选会给出 HEVC 里不存在的 Level 7.1）。
+`{8k,4k} × {h264,h265} × 三档码率 × {30,60} fps` 这 **24 种组合每一种都真编一遍再 probe**
+（`tests/test_conformance_matrix.py`，整个矩阵 44 s）。
+
+**360 元数据**：ffmpeg 写不了球面元数据（只有解码侧 side data），所以 `sv3d` / `st3d` 由
+`vr_compose.spherical` 自己写进合并后的 MP4 —— 104 字节，等距圆柱、单眼、无旋转。
+交叉验证用的是 ffmpeg 自己的 demuxer（`ffprobe` 报 `Spherical Mapping / equirectangular`），
+并且有测试用**解码后的 md5** 保证插入 box 之后一个像素都没变（关键在于 `moov` 长大之后
+`stco` 里的绝对偏移必须跟着平移 —— 漏了这一步文件照样能解析、照样报元数据，但解出来是花的）。
+给以前渲的老文件补写：`vr-compose metadata <file> --write`。
 
 **续跑**：序列按整 GOP 切成分段，每段一个独立的 ffmpeg 进程，最后无损拼接。中断后重跑同一命令，
 已完成的分段直接跳过（用 `ffprobe` 校验帧数，不是看文件在不在），只补缺的。
@@ -300,11 +323,12 @@ src/vr_compose/
   stitch.py       逐帧重投影 + 羽化混合（基准实现）
   warp.py         静态 LUT，与 stitch 逐字节一致，任意线程数
   encode.py       ffmpeg 定位、level/tier 计算、分段写入、探针、拼接
-  pipeline.py     解码预取 -> warp -> 分段编码 -> 拼接，可续跑
+  spherical.py    手写 sv3d/st3d 的 360 元数据：注入、读回、box 树
+  pipeline.py     解码预取 -> warp -> 分段编码 -> 拼接 -> 写元数据，可续跑
   verify.py       几何自检（指标 A）与环绕接缝检查
   memory.py       峰值内存测量与 64 GB 软上限告警
   io.py           读 tile（丢掉无用的 alpha）、写 PNG
-  cli.py          discover / frame / sequence，以及 GUI 用的 NDJSON/取消接口
+  cli.py          discover / frame / sequence / metadata，以及 GUI 用的 NDJSON/取消接口
   gui/            PySide6 窗口：window.py + main_window.ui + style.qss
 tests/            pytest；真实数据的检查单独标记，数据不在时自动跳过
 tools/            复现 AGENTS.md 每个数字的脚本
