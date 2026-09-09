@@ -44,6 +44,7 @@ import numpy as np
 import numpy.typing as npt
 
 from vr_compose import encode, io, memory, verify
+from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
 from vr_compose.stitch import BIT_DEPTHS, DEFAULT_FEATHER_POWER, DEFAULT_SAMPLER
@@ -205,6 +206,15 @@ class SequenceJob:
     """Run the geometry gate on frames 0, N, 2N, ... of the job."""
     resume: bool = True
     keep_segments: bool = False
+    spherical: spherical_mod.Spherical | None = dataclasses.field(
+        default_factory=spherical_mod.Spherical
+    )
+    """Spherical Video V2 metadata written into the joined file, or `None` to leave it out.
+
+    Without it a player has no way to know the file is a projection rather than a very
+    wide flat video, so it is on by default and the conformance check demands it. The
+    metadata goes on the *joined* file only: `-c copy` does not carry it across a concat,
+    so annotating segments would achieve nothing."""
     memory_soft_limit: int = memory.SOFT_LIMIT_BYTES
     """Advisory. Above this the run warns and carries on -- it never fails or stops."""
 
@@ -507,8 +517,23 @@ def run_sequence(
 
     say(f"joining {len(finished_paths)} segment(s) ...")
     encode.concat(tools, finished_paths, job.output)
+    metadata_failure: str | None = None
+    if job.spherical is not None:
+        try:
+            added = spherical_mod.inject(job.output, job.spherical)
+            say(f"spherical metadata: {job.spherical.describe()} (+{added} bytes)")
+        except spherical_mod.SphericalError as exc:
+            # The frames are already encoded and joined, and the file is valid -- it just
+            # has no metadata. Failing the run here would throw away half an hour of
+            # rendering over 104 bytes that `vr-compose metadata --write` can add later,
+            # so this is reported as a conformance problem instead: non-zero exit, file
+            # kept, and the message says what to do about it.
+            metadata_failure = f"spherical metadata not written ({exc}); try `metadata --write`"
+            say(f"WARNING: {metadata_failure}")
     stream = encode.probe(tools, job.output)
-    problems = list(stream.conformance_problems(job.spec))
+    problems = list(stream.conformance_problems(job.spec, spherical=job.spherical is not None))
+    if metadata_failure:
+        problems.append(metadata_failure)
     if stream.frames != total:
         problems.append(f"joined file has {stream.frames} frames, expected {total}")
     if not job.keep_segments and not problems:

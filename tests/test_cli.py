@@ -5,12 +5,31 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
+import numpy as np
 import pytest
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
-from vr_compose import __version__
+from vr_compose import __version__, encode
 from vr_compose.cli import _master_size, build_parser, main
 from vr_compose.rig import twenty_file_rig
+
+
+def encode_tools() -> encode.Tools | None:
+    try:
+        return encode.find_tools()
+    except encode.FfmpegNotFound:
+        return None
+
+
+def _tiny_mp4(path: pathlib.Path) -> pathlib.Path:
+    """A small delivery file, written by the encoder path the pipeline itself uses."""
+    tools = encode_tools()
+    assert tools is not None
+    spec = encode.EncodeSpec(64, 32, "h264", 400, 30)
+    with encode.SegmentWriter(tools, spec, path) as writer:
+        for i in range(4):
+            writer.write(np.full((32, 64, 3), 40 + 20 * i, np.uint8))
+    return path
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -320,3 +339,44 @@ def test_the_video_name_is_stem_and_timestamp(tmp_path: pathlib.Path) -> None:
     _png_source(tmp_path / "src")
     chosen = next(s for s in source_mod.scan(tmp_path / "src") if s.usable)
     assert pipeline.default_output_name(chosen, "0908_1630") == "S_0908_1630.mp4"
+
+
+# --- 360 metadata on an existing file ------------------------------------------------
+
+
+def test_metadata_reports_absence_then_writes_it(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`vr-compose metadata` is for files rendered before the metadata existed."""
+    if encode_tools() is None:
+        pytest.skip("ffmpeg not available")
+    path = _tiny_mp4(tmp_path / "old.mp4")
+    assert main(["metadata", str(path)]) == 1, "no metadata is a failure exit, so scripts see it"
+    assert "absent" in capsys.readouterr().out
+
+    assert main(["metadata", str(path), "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "wrote" in out and "equirectangular" in out
+    # our parser and ffprobe both, because the command cross-checks them
+    assert out.count("equirectangular") == 2
+
+    assert main(["metadata", str(path), "--write"]) == 0
+    assert "already carries" in capsys.readouterr().out
+
+
+def test_metadata_refuses_a_missing_file(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(SystemExit, match="no such file"):
+        main(["metadata", str(tmp_path / "nope.mp4")])
+
+
+def test_metadata_says_what_is_wrong_with_a_file_it_cannot_annotate(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "junk.mp4"
+    path.write_bytes(b"not an mp4 at all, but long enough to walk")
+    before = path.read_bytes()
+    # The complaint names the box that did not add up, rather than a traceback -- and the
+    # file is left exactly as it was, which is the part that matters for a delivery.
+    with pytest.raises(SystemExit, match=r"claims .* bytes, past the file"):
+        main(["metadata", str(path), "--write"])
+    assert path.read_bytes() == before

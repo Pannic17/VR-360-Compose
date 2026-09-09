@@ -31,7 +31,7 @@ from collections.abc import Sequence
 
 from tqdm import tqdm
 
-from vr_compose import __version__, encode, io, pipeline, verify
+from vr_compose import __version__, encode, io, pipeline, spherical, verify
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
 from vr_compose.stitch import (
@@ -243,6 +243,7 @@ DELIVERY_ONLY = (
     "encoder_threads",
     "keep_segments",
     "stitch_at",
+    "no_spherical",
 )
 """`sequence` options that only mean something when an encoder is involved."""
 
@@ -481,6 +482,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             stats_every=args.stats_every,
             resume=not args.no_resume,
             keep_segments=args.keep_segments,
+            spherical=None if args.no_spherical else spherical.Spherical(),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -602,6 +604,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         f"{stream.width}x{stream.height} {stream.pix_fmt} B={stream.b_frames} "
         f"I-gap={list(stream.i_intervals)} {stream.bitrate_mbps:.1f} Mbps"
     )
+    report.say(f"spherical  : {stream.projection or 'absent (--no-spherical)'}")
     for warning in summary.warnings:
         report.say(f"WARNING    : {warning}")
     report.event(
@@ -624,6 +627,38 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metadata(args: argparse.Namespace) -> int:
+    """Report -- or add -- the Spherical Video V2 metadata on an MP4 that already exists.
+
+    `sequence` writes it as part of the job, so this is for files rendered before the
+    metadata existed, and for checking a delivery without re-rendering it.
+    """
+    path: pathlib.Path = args.file
+    if not path.is_file():
+        raise SystemExit(f"no such file: {path}")
+    try:
+        present = spherical.read(path)
+        if args.write and present is None:
+            added = spherical.inject(path)
+            present = spherical.read(path)
+            print(f"wrote {added} bytes of spherical metadata into {path.name}")
+        elif args.write:
+            print(f"{path.name} already carries spherical metadata; left untouched")
+    except spherical.SphericalError as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"metadata   : {present.describe() if present else 'absent'}")
+    try:
+        tools = encode.find_tools()
+    except encode.FfmpegNotFound:
+        return 0 if present else 1
+    # ffprobe is an independent reader of the same boxes; if the two disagree, believe it.
+    stream = encode.probe(tools, path)
+    print(f"ffprobe    : projection {stream.projection or 'absent'}")
+    if bool(present) != bool(stream.projection):
+        raise SystemExit("our parser and ffprobe disagree; the boxes are malformed")
+    return 0 if present else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vr-compose", description="VR 360 composition toolkit")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -637,6 +672,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover = sub.add_parser("discover", help="report the detected source sets and rig")
     discover.set_defaults(func=cmd_discover)
+
+    metadata = sub.add_parser("metadata", help="report or add the 360 metadata on an MP4")
+    metadata.add_argument("file", type=pathlib.Path)
+    metadata.add_argument(
+        "--write", action="store_true", help="add the metadata if the file has none"
+    )
+    metadata.set_defaults(func=cmd_metadata)
 
     frame = sub.add_parser("frame", help="stitch a single frame and check its geometry")
     frame.add_argument("--frame", type=int, default=None, help="default: the first shared frame")
@@ -755,6 +797,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop cleanly when a line arrives on stdin, or when stdin reaches EOF -- "
         "which also covers 'the parent process is gone'. Finished work is kept and the "
         "job stays resumable, exactly as with Ctrl-C",
+    )
+    sequence.add_argument(
+        "--no-spherical",
+        action="store_true",
+        help="leave out the Spherical Video V2 metadata; the file then plays as a flat "
+        "2:1 video instead of a 360 panorama (--out-format mp4 only)",
     )
     sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
     sequence.add_argument("--keep-segments", action="store_true")

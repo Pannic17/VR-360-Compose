@@ -350,61 +350,61 @@ def compare(decoded: U8, refs: list[npt.NDArray[np.int16]]) -> dict[str, float]:
 
 def cmd_matrix(args: argparse.Namespace) -> int:
     pattern = str(args.root / OUTPUT_SUBDIR / f"{OUTPUT_STEM}.%04d.png")
+    rates = [int(part) for part in str(args.rates).replace(" ", "").split(",") if part]
     print(
-        f"{args.frames} frames per config, preset={args.preset}, fps={args.fps}, "
-        f"GOP={gop_for(args.fps)}\n"
+        f"{args.frames} frames per config, preset={args.preset}, "
+        f"{len(rates)} frame rate(s): {rates}\n"
     )
     header = (
-        f"{'size':<5} {'codec':<6} {'Mbps':>5} {'profile':<8} {'level':>5} {'tier':<5} "
-        f"{'tag':<5} {'resolution':<11} {'pix_fmt':<8} {'B':>2} {'I-gap':>6} "
+        f"{'size':<5} {'codec':<6} {'Mbps':>5} {'fps':>4} {'profile':<8} {'level':>5} "
+        f"{'tier':<5} {'tag':<5} {'resolution':<11} {'pix_fmt':<8} {'B':>2} {'I-gap':>6} "
         f"{'actual':>8}  verdict"
     )
     print(header)
     failures = 0
-    for size in SIZES:
-        for codec in ("h264", "h265"):
-            for kbps in args.bitrates or BITRATES_KBPS[size]:
-                level, tier = select_level(size, codec, kbps, args.fps)
-                out = args.work / f"matrix_{size}_{codec}_{kbps // 1000}.mp4"
-                ok, err, _ = encode(
-                    pattern,
-                    out,
-                    args.frames,
-                    args.fps,
-                    size,
-                    video_args(size, codec, kbps, args.fps, preset=args.preset),
-                )
-                if not ok:
-                    print(f"{size:<5} {codec:<6} {kbps // 1000:>5} ENCODE FAILED: {err}")
-                    failures += 1
-                    continue
-                info = probe(out)
-                problems: list[str] = []
-                if info.profile != EXPECTED_PROFILE[codec]:
-                    problems.append(f"profile={info.profile}")
-                if info.level != level:
-                    problems.append(f"level={info.level}")
-                if info.tag != EXPECTED_TAG[codec]:
-                    problems.append(f"tag={info.tag}")
-                if info.pix_fmt != "yuv420p":
-                    problems.append(f"pix_fmt={info.pix_fmt}")
-                if info.b_frames:
-                    problems.append(f"B={info.b_frames}")
-                if (info.width, info.height) != SIZES[size]:
-                    problems.append(f"{info.width}x{info.height}")
-                # a clip shorter than one GOP has a single I-frame, hence no interval
-                if info.i_intervals not in ([], [gop_for(args.fps)]):
-                    problems.append(f"I-interval={info.i_intervals}")
-                verdict = "OK" if not problems else "FAIL: " + " ".join(problems)
-                failures += bool(problems)
-                print(
-                    f"{size:<5} {codec:<6} {kbps // 1000:>5} {info.profile:<8} "
-                    f"{info.level:>5} {tier:<5} {info.tag:<5} "
-                    f"{info.width}x{info.height:<6} {info.pix_fmt:<8} "
-                    f"{info.b_frames:>2} {info.i_intervals!s:>7} "
-                    f"{info.bitrate_mbps:7.1f}M  {verdict}"
-                )
-                out.unlink(missing_ok=True)
+    for fps, size, codec in itertools.product(rates, SIZES, ("h264", "h265")):
+        for kbps in args.bitrates or BITRATES_KBPS[size]:
+            level, tier = select_level(size, codec, kbps, fps)
+            out = args.work / f"matrix_{size}_{codec}_{kbps // 1000}_{fps}.mp4"
+            ok, err, _ = encode(
+                pattern,
+                out,
+                args.frames,
+                fps,
+                size,
+                video_args(size, codec, kbps, fps, preset=args.preset),
+            )
+            if not ok:
+                print(f"{size:<5} {codec:<6} {kbps // 1000:>5} {fps:>4} FAILED: {err}")
+                failures += 1
+                continue
+            info = probe(out)
+            problems: list[str] = []
+            if info.profile != EXPECTED_PROFILE[codec]:
+                problems.append(f"profile={info.profile}")
+            if info.level != level:
+                problems.append(f"level={info.level}")
+            if info.tag != EXPECTED_TAG[codec]:
+                problems.append(f"tag={info.tag}")
+            if info.pix_fmt != "yuv420p":
+                problems.append(f"pix_fmt={info.pix_fmt}")
+            if info.b_frames:
+                problems.append(f"B={info.b_frames}")
+            if (info.width, info.height) != SIZES[size]:
+                problems.append(f"{info.width}x{info.height}")
+            # a clip shorter than one GOP has a single I-frame, hence no interval
+            if info.i_intervals not in ([], [gop_for(fps)]):
+                problems.append(f"I-interval={info.i_intervals}")
+            verdict = "OK" if not problems else "FAIL: " + " ".join(problems)
+            failures += bool(problems)
+            print(
+                f"{size:<5} {codec:<6} {kbps // 1000:>5} {fps:>4} {info.profile:<8} "
+                f"{info.level:>5} {tier:<5} {info.tag:<5} "
+                f"{info.width}x{info.height:<6} {info.pix_fmt:<8} "
+                f"{info.b_frames:>2} {info.i_intervals!s:>7} "
+                f"{info.bitrate_mbps:7.1f}M  {verdict}"
+            )
+            out.unlink(missing_ok=True)
     print(f"\n{'all configurations conformant' if not failures else f'{failures} FAILURES'}")
     print(
         "Note: 'actual' is not a conformance check on a clip this short -- with a "
@@ -679,6 +679,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("matrix", help="spec conformance across every configuration")
     p.add_argument("--frames", type=int, default=8)
     p.add_argument("--preset", default="medium")
+    p.add_argument(
+        "--rates",
+        default="30,60",
+        help="frame rates to cover; the delivery matrix is 12 configurations x 2 rates",
+    )
     p.set_defaults(func=cmd_matrix)
 
     p = sub.add_parser("rate", help="rate-quality curve vs the lossless master")

@@ -455,9 +455,22 @@ class StreamInfo:
     i_intervals: tuple[int, ...]
     bitrate_mbps: float
     audio_streams: int
+    projection: str
+    """What ffmpeg's demuxer makes of the spherical metadata: `equirectangular`, or "".
 
-    def conformance_problems(self, spec: EncodeSpec) -> list[str]:
+    Read here rather than with :func:`vr_compose.spherical.read` on purpose. The boxes are
+    written by this project, so checking them with this project's own parser would only
+    prove it agrees with itself; ffmpeg's `mov` demuxer is an independent implementation
+    of the same spec, and it is the one a player is likely to share code with.
+    """
+
+    def conformance_problems(self, spec: EncodeSpec, *, spherical: bool = False) -> list[str]:
+        """Every spec field, as written. `spherical` for a finished delivery file only --
+        segments are intermediates and carry no metadata, `-c copy` would drop it anyway.
+        """
         problems: list[str] = []
+        if spherical and self.projection != "equirectangular":
+            problems.append(f"spherical projection {self.projection or 'absent'!r}")
         if self.profile != spec.expected_profile:
             problems.append(f"profile {self.profile!r} != {spec.expected_profile!r}")
         if self.level != spec.level:
@@ -520,6 +533,14 @@ def probe(tools: Tools, path: pathlib.Path) -> StreamInfo:
         ).stdout.split()
     ).replace(",", "")
     i_positions = [i for i, c in enumerate(types) if c == "I"]
+    projection = next(
+        (
+            str(entry.get("projection", ""))
+            for entry in video.get("side_data_list", [])
+            if entry.get("side_data_type") == "Spherical Mapping"
+        ),
+        "",
+    )
     return StreamInfo(
         codec=str(video["codec_name"]),
         profile=str(video.get("profile", "")),
@@ -535,6 +556,7 @@ def probe(tools: Tools, path: pathlib.Path) -> StreamInfo:
         i_intervals=tuple(sorted({b - a for a, b in itertools.pairwise(i_positions)})),
         bitrate_mbps=int(meta["format"].get("bit_rate", 0)) / 1e6,
         audio_streams=audio,
+        projection=projection,
     )
 
 

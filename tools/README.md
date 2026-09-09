@@ -20,6 +20,7 @@
 | `seam_probe.py` | §8「接缝、羽化指数」—— 20 点接缝梯度不连续性 + 羽化扫描 | 约 2 分钟 |
 | `temporal_probe.py` | §8「时域稳定性」—— 连续 10 帧的方差与与网格无关的跳变界 | 约 4 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
+| `chroma_probe.py` | §5「4:2:0 的账」—— 自己做 4:2:0（线性光 / 正确取样位置 / 抖动）能不能赢过 swscale，以及那 4.3 dB 到底在谁身上 | 8K 约 15 分钟 |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池（**探针**，用合成小程序） | 每种配置约 90 s 构建 |
 | `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明（md 与 pdf）+ 冒烟校验；`--onefile` 出单文件 | 约 2 / 5 分钟 |
 | `manual_pdf.py` | 把 `docs/使用说明.md` 排版成 PDF（Edge/Chrome 无头打印） | 数秒 |

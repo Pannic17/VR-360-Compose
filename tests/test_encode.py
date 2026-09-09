@@ -220,7 +220,7 @@ def _info(**overrides: object) -> StreamInfo:
     base = dict(
         codec="h264", profile="High", level="6.0", tag="avc1", width=7680, height=3840,
         pix_fmt="yuv420p", color_range="tv", color_space="bt709", frames=120, b_frames=0,
-        i_intervals=(60,), bitrate_mbps=198.0, audio_streams=0,
+        i_intervals=(60,), bitrate_mbps=198.0, audio_streams=0, projection="equirectangular",
     )  # fmt: skip
     base.update(overrides)
     return StreamInfo(**base)  # type: ignore[arg-type]

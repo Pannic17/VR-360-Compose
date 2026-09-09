@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
-from vr_compose import encode, pipeline, source
+from vr_compose import encode, pipeline, source, spherical
 from vr_compose.encode import EncodeSpec
 from vr_compose.pipeline import GeometryGateFailed, Progress, SequenceJob, parse_frames
 from vr_compose.rig import Rig, View, rig_for, twenty_file_rig
@@ -185,6 +185,12 @@ def test_full_run_produces_a_conformant_mp4(
     assert summary.stream.i_intervals == (60,), "segment joins must land exactly on GOP boundaries"
     assert summary.stream.b_frames == 0 and summary.stream.audio_streams == 0
     assert summary.output.exists() and not job.segment_dir.exists()
+    # The delivery carries its 360 metadata, and it is the *joined* file that carries it:
+    # `-c copy` does not bring the boxes across a concat, so annotating segments would
+    # produce a file that plays flat.
+    assert summary.stream.projection == "equirectangular"
+    written = spherical.read(summary.output)
+    assert written is not None and written.stereo_mode == spherical.MONOSCOPIC
 
     assert [r.passed for r in summary.gate_reports] == [True, True, True], (
         "frames 0, 50, 100 sampled"
@@ -223,6 +229,44 @@ def test_a_plan_for_the_delivery_size_is_refused_when_a_master_is_asked_for(
     delivery_plan = WarpPlan.build(job.rig, WIDTH, HEIGHT, TILE)
     with pytest.raises(ValueError, match="does not match this job"):
         pipeline.run_sequence(job, plan=delivery_plan)
+
+
+@needs_ffmpeg
+def test_a_run_without_the_metadata_is_reported_not_thrown_away(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """104 bytes must not cost half an hour of rendering.
+
+    If the metadata cannot be written, the joined file is still a valid MP4 -- it just
+    plays flat -- and `metadata --write` can fix it afterwards. So this is a conformance
+    problem (non-zero exit, file kept), never an exception.
+    """
+
+    def refuse(*_args: object, **_kwargs: object) -> int:
+        raise spherical.SphericalError("no video track among 0 track(s)")
+
+    monkeypatch.setattr(spherical, "inject", refuse)
+    job = _job(moving_source, tmp_path / "bare.mp4", keep_segments=False)
+    summary = pipeline.run_sequence(job)
+
+    assert summary.output.exists(), "the render is kept"
+    assert summary.stream.frames == 130
+    assert summary.stream.projection == ""
+    assert any("metadata --write" in problem for problem in summary.problems), summary.problems
+    assert any("spherical projection" in problem for problem in summary.problems)
+
+
+@needs_ffmpeg
+def test_no_spherical_asks_for_no_metadata_and_that_is_not_a_problem(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """`--no-spherical` is an escape hatch, so it must not trip its own conformance check."""
+    job = _job(moving_source, tmp_path / "flat.mp4", keep_segments=False, spherical=None)
+    summary = pipeline.run_sequence(job)
+
+    assert summary.problems == (), summary.problems
+    assert summary.stream.projection == ""
+    assert spherical.read(summary.output) is None
 
 
 @needs_ffmpeg
