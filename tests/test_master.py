@@ -281,3 +281,61 @@ def test_the_delivery_path_refuses_a_deep_frame() -> None:
 def test_bit_depth_is_validated(still_source: source.SourceSet, tmp_path: pathlib.Path) -> None:
     with pytest.raises(ValueError, match="bit_depth"):
         _job(still_source, tmp_path / "out", bit_depth=12)
+
+
+def _gpu_usable() -> bool:
+    from vr_compose import device
+
+    found = device.probe_cuda()
+    return found.importable and not found.error and found.count > 0
+
+
+@pytest.mark.skipif(not _gpu_usable(), reason="no usable CUDA device")
+@pytest.mark.parametrize("bit_depth", [8, 16])
+def test_cuda_masters_are_the_cpu_masters_byte_for_byte(
+    still_source: source.SourceSet,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bit_depth: int,
+) -> None:
+    """Metric D through the PNG sink, on the device, at both depths."""
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "MIN_CUDA_MEMORY_BYTES", 1)
+    cuda = pipeline.run_master(
+        _job(still_source, tmp_path / "cuda", device="cuda", bit_depth=bit_depth)
+    )
+    cpu = pipeline.run_master(_job(still_source, tmp_path / "cpu", bit_depth=bit_depth))
+    assert cuda.device == "cuda" and cuda.warnings == ()
+    assert cuda.written == cpu.written == len(FRAMES)
+    for frame in FRAMES:
+        name = f"S_S_{frame:04d}.png"
+        assert (tmp_path / "cuda" / name).read_bytes() == (tmp_path / "cpu" / name).read_bytes()
+
+
+def test_write_workers_default_follows_the_device(
+    still_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset, the writer pool is sized for where the warp *runs*: 1 on the CPU (a second
+    writer slows the warp), 4 on the GPU. A `cuda` request that fell back asks for the
+    CPU's number; an explicit value is used as given."""
+    from vr_compose import device
+
+    assert pipeline.default_write_workers("cpu") == 1
+    assert pipeline.default_write_workers("cuda") == 4
+    asked: list[str] = []
+
+    def record(device_name: str) -> int:
+        asked.append(device_name)
+        return pipeline.WRITE_WORKERS[device_name]
+
+    monkeypatch.setattr(pipeline, "default_write_workers", record)
+    monkeypatch.setattr(device, "probe_cuda", lambda: device.CudaProbe(importable=True, count=0))
+    job = _job(still_source, tmp_path / "out", device="cuda")
+    assert job.write_workers is None
+    pipeline.run_master(job)
+    assert asked == ["cpu"], "the fallback device decides, not the requested one"
+
+    asked.clear()
+    pipeline.run_master(_job(still_source, tmp_path / "explicit", write_workers=2))
+    assert asked == [], "an explicit value bypasses the default"

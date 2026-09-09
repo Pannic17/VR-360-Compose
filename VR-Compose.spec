@@ -71,7 +71,11 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # The GPU warp (`vr_compose.warp_gpu`) imports cupy lazily, but PyInstaller follows
+    # imports inside functions too and its cupy hook would then drag ~1 GB of CUDA
+    # libraries into a build meant for the GUI, which never asks for the GPU. Excluded on
+    # purpose (approved 2026-09-09); `--device cuda` is for running from source.
+    excludes=["cupy", "cupyx", "cupy_backends", "cuda", "fastrlock"],
     noarchive=False,
     optimize=0,
 )

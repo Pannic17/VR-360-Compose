@@ -380,3 +380,67 @@ def test_metadata_says_what_is_wrong_with_a_file_it_cannot_annotate(
     with pytest.raises(SystemExit, match=r"claims .* bytes, past the file"):
         main(["metadata", str(path), "--write"])
     assert path.read_bytes() == before
+
+
+# --- --device -----------------------------------------------------------------------------
+
+
+def test_device_is_a_cli_option_defaulting_to_cpu() -> None:
+    """GPU acceleration is opt-in from the command line only (user, 2026-09-09)."""
+    parser = build_parser()
+    for sub in ("frame", "sequence"):
+        args = parser.parse_args([sub])
+        assert args.device == "cpu", sub
+        assert parser.parse_args([sub, "--device", "cuda"]).device == "cuda"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["sequence", "--device", "opencl"])
+
+
+def test_frame_with_cuda_but_no_gpu_warns_and_still_stitches(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "probe_cuda", lambda: device.CudaProbe(importable=False, error="x"))
+    rig = twenty_file_rig()
+    panorama = analytic_panorama(512, 256)
+    tiles = {i: sample_panorama_into_tile(panorama, rig, i, 128) for i in range(1, 21)}
+    make_source_tree(
+        tmp_path, cameras=20, stem="Scene_A", frames=[5], size=(128, 128),
+        tile_for=lambda index, _frame: tiles[index],
+    )  # fmt: skip
+    out = tmp_path / "out" / "pano.png"
+    argv = ["--source", str(tmp_path), "frame", "--frame", "5", "--width", "512",
+            "--out", str(out), "--device", "cuda"]  # fmt: skip
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert "WARNING    : GPU requested" in text and "falling back to the CPU" in text
+    assert "PASS" in text and out.exists()
+
+
+def _gpu_usable() -> bool:
+    from vr_compose import device
+
+    found = device.probe_cuda()
+    return found.importable and not found.error and found.count > 0
+
+
+@pytest.mark.skipif(not _gpu_usable(), reason="no usable CUDA device")
+def test_frame_on_cuda_writes_the_cpu_bytes(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "MIN_CUDA_MEMORY_BYTES", 1)
+    rig = twenty_file_rig()
+    panorama = analytic_panorama(512, 256)
+    tiles = {i: sample_panorama_into_tile(panorama, rig, i, 128) for i in range(1, 21)}
+    make_source_tree(
+        tmp_path, cameras=20, stem="Scene_A", frames=[5], size=(128, 128),
+        tile_for=lambda index, _frame: tiles[index],
+    )  # fmt: skip
+    common = ["--source", str(tmp_path), "frame", "--frame", "5", "--width", "512", "--out"]
+    assert main([*common, str(tmp_path / "cuda.png"), "--device", "cuda"]) == 0
+    assert "warp       : cuda" in capsys.readouterr().out
+    assert main([*common, str(tmp_path / "cpu.png")]) == 0
+    assert (tmp_path / "cuda.png").read_bytes() == (tmp_path / "cpu.png").read_bytes()

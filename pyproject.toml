@@ -18,6 +18,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# GPU warp (ROADMAP "可选 — GPU 加速"): opt-in from the CLI only (`--device cuda`), and
+# only for an NVIDIA card with 12 GB or more; anything else warns and runs on the CPU.
+# The pip wheel finds the CUDA runtime on its own (cuda-pathfinder); tested with 14.2.
+gpu = [
+    "cupy-cuda12x>=13.4",
+]
 dev = [
     "pyinstaller>=6.10",   # 打包 exe（P8）
     "types-tqdm",          # mypy --strict 需要 tqdm 的 stub

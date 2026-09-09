@@ -156,7 +156,8 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--deterministic` | 关 | 续跑结果逐字节一致；编码器慢 6–8 倍，一般不用（见下） |
 | `--segment-gops` | `5` | 每个可续跑分段含几个 GOP（5 × 2 s = 10 s） |
 | `--stats-every` | `100` | 每多少帧做一次几何自检 |
-| `--decode-workers` | `4` | 解码线程；**多于 4 会拖慢 warp**（GIL 争用，实测） |
+| `--device` | `cpu` | warp 在哪跑。`cuda` 用 NVIDIA 显卡，输出与 CPU **逐字节一致**，8K catmullrom 从 11 s/帧到 40 ms；需要 `pip install -e .[gpu]`。没有卡、没装 cupy、或显存低于 12 GB 时打 Warning 回退 `cpu`，作业照常跑。**GUI 不提供这个开关** |
+| `--decode-workers` | 按设备 | 解码线程。不设时 CPU 取 4（**多于 4 会拖慢 warp**，GIL 争用），GPU 取 8（那里解码才是瓶颈，4→8 让等待从 0.24 s 降到 0.13 s） |
 | `--warp-threads` | `8` | 重投影线程 |
 | `--encoder-threads` | 不设 | 给编码器的线程上限，用来压它的内存：不设时整机峰值约 24 GiB、最快；给 16 降到约 10 GiB，吞吐掉 4%。只是脚印旋钮，**不影响可复现性** |
 | `--no-spherical` | | 不写 360 元数据。写出来的文件在播放器里就是个 2:1 的平面视频，**只用于排查** |
@@ -271,7 +272,7 @@ catmullrom 在它上面比 bilinear 差，却对源还原好 1.24 dB。细节见
 | 上一代流程 | 46.85 s/帧，同样 778 帧要 10 小时 |
 | 8K 编码 | 不是瓶颈：x264 只用到 0.4 核 |
 
-GPU 加速列为可选项（估计 warp 可到 30–40 ms，778 帧约 3 分钟），未决定是否引入，见 ROADMAP。
+**GPU 加速（仅命令行）**：`pip install -e .[gpu]` 后加 `--device cuda`，8K catmullrom 的 warp 从 11 s 到 40 ms，100 帧实跑 0.48 s/帧（瓶颈换成 PNG 解码与 x264）。输出与 CPU **逐字节一致**。没有 NVIDIA 卡、或显存低于 12 GB 时打 Warning 回退 CPU，作业照常跑；GUI 不提供这个开关。见 AGENTS.md 第 8 节。
 
 ## 常见问题
 

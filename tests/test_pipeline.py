@@ -608,3 +608,146 @@ def test_refuses_to_start_on_a_full_disk(
         pytest.skip("ffmpeg not available")
     with pytest.raises(RuntimeError, match="Refusing to start"):
         pipeline.run_sequence(job)
+
+
+# --- where the warp runs ----------------------------------------------------------------
+
+
+def test_the_job_refuses_an_unknown_device(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    with pytest.raises(ValueError, match="device must be one of"):
+        _job(moving_source, tmp_path / "out.mp4", device="tpu")
+    assert _job(moving_source, tmp_path / "out.mp4").device == "cpu", "cpu is the default"
+
+
+@needs_ffmpeg
+def test_asking_for_cuda_without_a_gpu_warns_and_runs_on_the_cpu(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's rule (2026-09-09): no NVIDIA card, or too small a card, is a warning
+    and a CPU run -- never a refused job. The output is the CPU's, byte for byte -- with
+    x264 pinned to its reproducible mode, as every byte comparison in this file is."""
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "probe_cuda", lambda: device.CudaProbe(importable=True, count=0))
+    said: list[str] = []
+    job = _job(
+        moving_source, tmp_path / "cuda.mp4", device="cuda", frames=FRAMES[:60], deterministic=True
+    )
+    summary = pipeline.run_sequence(job, log=said.append)
+
+    assert summary.device == "cpu" and summary.problems == ()
+    assert summary.stream.frames == 60
+    assert len(summary.warnings) == 1 and "no CUDA device" in summary.warnings[0]
+    assert any(line.startswith("WARNING: GPU requested") for line in said)
+
+    reference = pipeline.run_sequence(
+        _job(moving_source, tmp_path / "cpu.mp4", frames=FRAMES[:60], deterministic=True)
+    )
+    assert _sha(summary.output) == _sha(reference.output), "the fallback is the CPU path itself"
+
+
+@needs_ffmpeg
+def test_a_card_below_the_floor_warns_with_its_size(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import device
+
+    small = device.CudaProbe(importable=True, count=1, name="Small GPU", total_bytes=12 * 10**9)
+    monkeypatch.setattr(device, "probe_cuda", lambda: small)
+    summary = pipeline.run_sequence(
+        _job(moving_source, tmp_path / "out.mp4", device="cuda", frames=FRAMES[:60])
+    )
+    assert summary.device == "cpu"
+    assert summary.warnings and "Small GPU has 12.0 GB" in summary.warnings[0]
+
+
+@needs_ffmpeg
+def test_a_failed_upload_is_a_warning_not_a_failure(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate can pass and the upload still fail (driver, memory). Same rule: warn, run."""
+    from vr_compose import device, warp_gpu
+
+    big = device.CudaProbe(importable=True, count=1, name="Phantom GPU", total_bytes=24 * 10**9)
+    monkeypatch.setattr(device, "probe_cuda", lambda: big)
+
+    def refuse(_plan: object) -> object:
+        raise warp_gpu.GpuUnavailable("simulated: out of device memory")
+
+    monkeypatch.setattr(warp_gpu.GpuWarpPlan, "from_plan", staticmethod(refuse))
+    summary = pipeline.run_sequence(
+        _job(moving_source, tmp_path / "out.mp4", device="cuda", frames=FRAMES[:60])
+    )
+    assert summary.device == "cpu" and summary.stream.frames == 60
+    assert summary.warnings and "could not be placed on Phantom GPU" in summary.warnings[0]
+    assert "simulated" in summary.warnings[0]
+
+
+def _gpu_usable() -> bool:
+    from vr_compose import device
+
+    found = device.probe_cuda()
+    return found.importable and not found.error and found.count > 0
+
+
+@needs_ffmpeg
+@pytest.mark.skipif(not _gpu_usable(), reason="no usable CUDA device")
+def test_a_cuda_run_produces_the_same_mp4_as_the_cpu(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end on the device: the same frames go into x264 pinned to its reproducible
+    mode, so the same file comes out. The floor is lowered so any real card serves; the
+    floor itself is tested in `tests/test_device.py`."""
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "MIN_CUDA_MEMORY_BYTES", 1)
+    said: list[str] = []
+    cuda = pipeline.run_sequence(
+        _job(
+            moving_source,
+            tmp_path / "cuda.mp4",
+            device="cuda",
+            frames=FRAMES[:60],
+            deterministic=True,
+        ),
+        log=said.append,
+    )
+    cpu = pipeline.run_sequence(
+        _job(moving_source, tmp_path / "cpu.mp4", frames=FRAMES[:60], deterministic=True)
+    )
+
+    assert cuda.device == "cuda" and cuda.warnings == () and cuda.problems == ()
+    assert cuda.device_detail and any(line.startswith("warp on ") for line in said)
+    assert [r.passed for r in cuda.gate_reports] == [True, True], "the gate ran on GPU statistics"
+    assert _sha(cuda.output) == _sha(cpu.output)
+
+
+def test_decode_workers_default_follows_the_device_the_warp_landed_on(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset, the decode pool is sized for where the warp *runs*: a `cuda` request that
+    fell back to the CPU must get the CPU's 4, not the GPU's 8 (which would slow the
+    CPU warp by GIL contention -- AGENTS.md section 8)."""
+    from vr_compose import device, io
+
+    seen: list[int] = []
+    real = io.load_tiles
+
+    def spy(*args: object, workers: int = 1, **kwargs: object) -> object:
+        seen.append(workers)
+        return real(*args, workers=workers, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(io, "load_tiles", spy)
+    monkeypatch.setattr(device, "probe_cuda", lambda: device.CudaProbe(importable=True, count=0))
+    assert pipeline.default_decode_workers("cpu") == 4
+    assert pipeline.default_decode_workers("cuda") == 8
+    job = _job(moving_source, tmp_path / "out.mp4", device="cuda", frames=FRAMES[:60])
+    assert job.decode_workers is None
+    if not HAVE_FFMPEG:
+        pytest.skip("ffmpeg not available")
+    pipeline.run_sequence(job)
+    assert seen and set(seen) == {4}
+    with pytest.raises(ValueError, match="decode_workers must be"):
+        _job(moving_source, tmp_path / "out2.mp4", decode_workers=0)

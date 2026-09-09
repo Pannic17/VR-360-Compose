@@ -32,6 +32,7 @@ from collections.abc import Sequence
 from tqdm import tqdm
 
 from vr_compose import __version__, encode, io, pipeline, spherical, verify
+from vr_compose import device as device_mod
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
 from vr_compose.stitch import (
@@ -42,7 +43,7 @@ from vr_compose.stitch import (
     SAMPLERS,
     stitch_frame,
 )
-from vr_compose.warp import DEFAULT_THREADS
+from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 
 
 def _master_size(
@@ -208,15 +209,34 @@ def cmd_frame(args: argparse.Namespace) -> int:
     tiles = io.load_tiles(chosen, frame, indices, workers=args.decode_workers)
     decoded = time.time() - started
 
-    result = stitch_frame(
-        tiles,
-        rig,
-        width,
-        band_rows=args.band_rows,
-        sampler=args.sampler,
-        feather_power=args.feather_power,
-        bit_depth=args.bit_depth,
-    )
+    placement = device_mod.resolve_device(args.device)
+    if placement.fell_back:
+        print(f"WARNING    : {placement.warning}")
+    if placement.device == "cuda":
+        # The plan is the verified geometry evaluated once; the GPU only applies it. Same
+        # bytes as `stitch_frame` -- tests/test_warp_gpu.py holds that line.
+        from vr_compose import warp_gpu
+
+        plan = WarpPlan.build(
+            rig, width, width // 2, tile, band_rows=args.band_rows,
+            sampler=args.sampler, feather_power=args.feather_power,
+        )  # fmt: skip
+        gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
+        print(
+            f"warp       : cuda ({placement.detail}), plan built in {plan.build_seconds:.1f} s, "
+            f"resident in {gpu.upload_seconds:.1f} s"
+        )
+        result = gpu.apply(tiles, with_stats=True, bit_depth=args.bit_depth)
+    else:
+        result = stitch_frame(
+            tiles,
+            rig,
+            width,
+            band_rows=args.band_rows,
+            sampler=args.sampler,
+            feather_power=args.feather_power,
+            bit_depth=args.bit_depth,
+        )
     elapsed = time.time() - started
     print(
         f"stitched   : frame {frame} at {width}x{width // 2} in {elapsed:.1f} s "
@@ -232,6 +252,16 @@ def cmd_frame(args: argparse.Namespace) -> int:
         print(f"wrote      : {args.out}  ({size / 2**20:.1f} MiB)")
     return 0 if report.passed else 1
 
+
+def _describe_device(device: str, detail: str) -> str:
+    return f"{device} ({detail})" if detail else device
+
+
+DEVICE_HELP = (
+    "where the warp runs. 'cpu' (default) is the byte-exact reference; 'cuda' gives the "
+    "same bytes from an NVIDIA GPU with at least 12 GB (needs `pip install "
+    "vr-compose[gpu]`). Without such a GPU the run warns and uses the CPU"
+)
 
 DELIVERY_ONLY = (
     "size",
@@ -304,6 +334,7 @@ def cmd_master(
             write_workers=args.write_workers,
             stats_every=args.stats_every,
             resume=not args.no_resume,
+            device=args.device,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -403,6 +434,7 @@ def cmd_master(
             f"({summary.bytes_written / 2**30:.2f} GiB written)"
         )
         report.say(f"stages     : {summary.stages.report()}")
+    report.say(f"warp       : {_describe_device(summary.device, summary.device_detail)}")
     if summary.skipped:
         report.say(f"resumed    : {summary.skipped} master(s) were already present")
     if summary.gate_reports:
@@ -422,6 +454,7 @@ def cmd_master(
         skipped=summary.skipped,
         seconds_per_frame=round(summary.seconds_per_frame, 3),
         size_bytes=summary.bytes_written,
+        device=summary.device,
         problems=[],
         warnings=list(summary.warnings),
     )
@@ -484,6 +517,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             resume=not args.no_resume,
             keep_segments=args.keep_segments,
             spherical=None if args.no_spherical else spherical.Spherical(),
+            device=args.device,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -591,6 +625,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             f"encoded frame(s) ({speedup:.1f}x vs the previous pipeline's 46.85)"
         )
         report.say(f"stages     : {summary.stages.report()}")
+    report.say(f"warp       : {_describe_device(summary.device, summary.device_detail)}")
     if summary.peak.measured:
         report.say(f"memory     : {summary.peak.report()}")
     if summary.skipped_segments:
@@ -616,6 +651,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         encoded=summary.encoded,
         seconds_per_frame=round(summary.seconds_per_frame, 3),
         size_bytes=summary.output.stat().st_size,
+        device=summary.device,
         problems=list(summary.problems),
         warnings=list(summary.warnings),
     )
@@ -697,6 +733,10 @@ def build_parser() -> argparse.ArgumentParser:
     frame.add_argument("--band-rows", type=int, default=DEFAULT_BAND_ROWS)
     frame.add_argument("--decode-workers", type=int, default=8)
     frame.add_argument(
+        "--device", choices=list(device_mod.DEVICES), default=device_mod.DEFAULT_DEVICE,
+        help=DEVICE_HELP,
+    )  # fmt: skip
+    frame.add_argument(
         "--bit-depth", type=int, default=8, choices=list(BIT_DEPTHS), help="output PNG depth"
     )
     frame.add_argument(
@@ -757,10 +797,15 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument(
         "--decode-workers",
         type=int,
-        default=4,
-        help="threads decoding the next frame; more than 4 slows the warp (GIL contention)",
+        default=None,
+        help="threads decoding the next frame. Default: 4 on the CPU (more slows the warp, "
+        "GIL contention), 8 on the GPU (there the decode is the bottleneck)",
     )
     sequence.add_argument("--warp-threads", type=int, default=DEFAULT_THREADS)
+    sequence.add_argument(
+        "--device", choices=list(device_mod.DEVICES), default=device_mod.DEFAULT_DEVICE,
+        help=DEVICE_HELP,
+    )  # fmt: skip
     sequence.add_argument(
         "--feather-power",
         type=float,
@@ -826,9 +871,10 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument(
         "--write-workers",
         type=int,
-        default=1,
-        help="PNG encodes in flight; 1 measured fastest at 8K -- a second worker hides "
-        "the write but slows the warp (--out-format png only)",
+        default=None,
+        help="PNG encodes in flight (--out-format png only). Default: 1 on the CPU (a "
+        "second worker slows the warp), 4 on the GPU (there the PNG encode is the "
+        "bottleneck: 8-bit 1.26 -> 0.51 s/frame)",
     )
     # Attached so `_reject_inapplicable` can tell "asked for" from "left alone".
     sequence.set_defaults(

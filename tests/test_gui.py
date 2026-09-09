@@ -560,3 +560,21 @@ def test_the_entry_point_makes_the_src_layout_importable() -> None:
 
     assert main_ui.SRC.name == "src"
     assert (main_ui.SRC / "vr_compose" / "__init__.py").is_file()
+
+
+def test_the_gui_never_asks_for_the_gpu(qt_app: QApplication, tmp_path: pathlib.Path) -> None:
+    """GPU acceleration is command-line only (user, 2026-09-09). The argv the window
+    assembles must not carry `--device`, so its jobs take the CLI's default: cpu."""
+    _source(tmp_path / "src")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "src"))
+        window.discover()
+        window.frames_edit.setText("1-3")
+        for radio in (window.video_radio, window.frames_radio):
+            radio.setChecked(True)
+            argv = window.build_command()
+            assert argv is not None
+            assert "--device" not in argv and "cuda" not in argv
+    finally:
+        window.close()

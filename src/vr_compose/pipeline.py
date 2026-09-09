@@ -39,15 +39,17 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
 
+from vr_compose import device as device_mod
 from vr_compose import encode, io, memory, verify
 from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
-from vr_compose.stitch import BIT_DEPTHS, DEFAULT_FEATHER_POWER, DEFAULT_SAMPLER
+from vr_compose.stitch import BIT_DEPTHS, DEFAULT_FEATHER_POWER, DEFAULT_SAMPLER, StitchResult
 from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 
 U8 = npt.NDArray[np.uint8]
@@ -61,6 +63,8 @@ __all__ = [
     "SequenceJob",
     "Summary",
     "contiguous_tail",
+    "default_decode_workers",
+    "default_write_workers",
     "parse_frames",
     "run_master",
     "run_sequence",
@@ -70,6 +74,32 @@ __all__ = [
 
 PREVIOUS_PIPELINE_SECONDS_PER_FRAME = 46.85
 """AGENTS.md §8: what the run replaces, for the progress line."""
+
+DECODE_WORKERS = {"cpu": 4, "cuda": 8}
+"""Default threads decoding the next frame, by where the warp actually runs.
+
+On the CPU the decode threads fight the warp threads for the GIL, and 4 measured best
+(8 slowed the warp from 2.0 s to 2.8 s). On the GPU there are no warp threads to fight,
+and the decode *is* the bottleneck: at 8K, 4 -> 8 threads took the wait from 0.24 s to
+0.13 s a frame (0.64 -> 0.48 s/frame end to end); 12 and 16 gained only 0.02-0.03 s more
+(AGENTS.md section 8, "GPU 加速"). Resolved after the device is placed, so a `cuda`
+request that fell back to the CPU gets the CPU's number."""
+
+
+WRITE_WORKERS = {"cpu": 1, "cuda": 4}
+"""Default PNG encodes in flight for the master sink, by where the warp actually runs.
+
+On the CPU a second writer slows the warp (2.40 -> 2.52 s/frame at 8K, AGENTS.md section
+8, P3). On the GPU the warp is 0.06-0.14 s and the PNG encode is the whole cost: 1 -> 4
+writers took 8-bit masters from 1.26 to 0.51 s/frame and 16-bit from 4.68 to 1.54."""
+
+
+def default_decode_workers(device: str) -> int:
+    return DECODE_WORKERS[device]
+
+
+def default_write_workers(device: str) -> int:
+    return WRITE_WORKERS[device]
 
 
 class GeometryGateFailed(RuntimeError):
@@ -191,13 +221,14 @@ class SequenceJob:
     output: pathlib.Path
     segment_gops: int = 5
     """Segment length in GOPs: 5 x 2 s = 10 s of video per ffmpeg run."""
-    decode_workers: int = 4
+    decode_workers: int | None = None
     """Threads decoding the *next* frame's 15 tiles while the current one warps.
 
-    Fewer than the obvious: the decode is already hidden behind the warp at 4 (measured
-    wait 0.02 s), and 8 decode threads slow the warp itself from 2.0 s to 2.8 s by
-    contending for the GIL between numpy calls. 4 decode + 8 warp threads measured best
-    at 8K (2.48 s/frame end to end)."""
+    `None` (default) picks :data:`DECODE_WORKERS` for the device the warp lands on: 4 on
+    the CPU, 8 on the GPU. Fewer than the obvious on the CPU: the decode is already hidden
+    behind the warp at 4 (measured wait 0.02 s), and 8 decode threads slow the warp itself
+    from 2.0 s to 2.8 s by contending for the GIL between numpy calls. 4 decode + 8 warp
+    threads measured best at 8K (2.48 s/frame end to end)."""
     warp_threads: int = DEFAULT_THREADS
     sampler: str = DEFAULT_SAMPLER
     """How a tile is read at a fractional position; see :data:`vr_compose.stitch.SAMPLERS`."""
@@ -217,6 +248,9 @@ class SequenceJob:
     so annotating segments would achieve nothing."""
     memory_soft_limit: int = memory.SOFT_LIMIT_BYTES
     """Advisory. Above this the run warns and carries on -- it never fails or stops."""
+    device: str = device_mod.DEFAULT_DEVICE
+    """Where the warp runs. `cpu` (default) always; `cuda` only if the machine qualifies,
+    otherwise the run warns and uses the CPU -- see :mod:`vr_compose.device`."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -225,6 +259,10 @@ class SequenceJob:
             raise ValueError("segment_gops must be >= 1")
         if self.output.suffix.lower() != ".mp4":
             raise ValueError(f"output must be an .mp4 path, got {self.output}")
+        if self.device not in device_mod.DEVICES:
+            raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
+        if self.decode_workers is not None and self.decode_workers < 1:
+            raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
 
     @property
     def segment_frames(self) -> int:
@@ -317,6 +355,9 @@ class Summary:
     peak: memory.PeakMemory = dataclasses.field(default_factory=memory.PeakMemory)
     warnings: tuple[str, ...] = ()
     """Advisory notes. Unlike `problems`, these do not make the run a failure."""
+    device: str = device_mod.DEFAULT_DEVICE
+    """Where the warp actually ran -- `cpu` after a fallback, whatever was asked for."""
+    device_detail: str = ""
 
     @property
     def seconds_per_frame(self) -> float:
@@ -345,8 +386,51 @@ def _prefetch_tiles(
         yield frame, tiles, time.time() - tick
 
 
+class Warper(Protocol):
+    """What the per-frame loop needs: :class:`WarpPlan` or its GPU twin."""
+
+    def apply(
+        self, tiles: dict[int, U8], *, with_stats: bool, threads: int, bit_depth: int
+    ) -> StitchResult: ...
+
+
+def _place_plan(
+    plan: WarpPlan, requested: str, say: Callable[[str], None], warnings: list[str]
+) -> tuple[Warper, device_mod.Placement]:
+    """Put the plan where the job asked, or where it can go, and say which.
+
+    A `cuda` request that cannot be served -- no card, a small card, `cupy` missing, or
+    the upload itself failing -- is a warning and a CPU run, never a refusal. The CPU
+    plan is the reference implementation, so nothing is lost but time.
+    """
+    placement = device_mod.resolve_device(requested)
+    if placement.fell_back:
+        assert placement.warning is not None
+        warnings.append(placement.warning)
+        say(f"WARNING: {placement.warning}")
+    if placement.device != "cuda":
+        return plan, placement
+    from vr_compose import warp_gpu
+
+    try:
+        gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
+    except Exception as error:
+        warning = (
+            f"GPU requested (--device cuda) but the warp plan could not be placed on "
+            f"{placement.detail}; falling back to the CPU. [{type(error).__name__}: {error}]"
+        )
+        warnings.append(warning)
+        say(f"WARNING: {warning}")
+        return plan, device_mod.Placement("cpu", warning)
+    say(
+        f"warp on {placement.detail}: plan resident in {gpu.upload_seconds:.1f} s "
+        f"({gpu.device_bytes / 1e9:.2f} GB of device memory)"
+    )
+    return gpu, placement
+
+
 def _stitch_one(
-    plan: WarpPlan, tiles: dict[int, U8], *, threads: int, gate: bool, bit_depth: int = 8
+    plan: Warper, tiles: dict[int, U8], *, threads: int, gate: bool, bit_depth: int = 8
 ) -> tuple[io.Panorama, verify.Agreement | None, float, float]:
     """One frame: `(image, gate report or None, warp seconds, gate seconds)`."""
     started = time.time()
@@ -430,6 +514,9 @@ def run_sequence(
         job.feather_power,
     ):
         raise ValueError("the supplied warp plan does not match this job")
+    warnings: list[str] = []
+    warper, placement = _place_plan(plan, job.device, say, warnings)
+    decode_workers = job.decode_workers or default_decode_workers(placement.device)
 
     indices = list(job.rig.unique_indices)
     segments = job.segments()
@@ -446,7 +533,7 @@ def run_sequence(
     encoder_resident = 0
 
     def decode(frame: int) -> dict[int, U8]:
-        return io.load_tiles(job.source, frame, indices, workers=job.decode_workers)
+        return io.load_tiles(job.source, frame, indices, workers=decode_workers)
 
     stop = cancel if cancel is not None else threading.Event()
     with _CancelScope(stop), concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch:
@@ -472,7 +559,7 @@ def run_sequence(
                     if stop.is_set():
                         raise Cancelled(f"cancelled after {done} of {total} frame(s)")
                     image, report, warp_seconds, gate_seconds = _stitch_one(
-                        plan,
+                        warper,
                         tiles,
                         threads=job.warp_threads,
                         gate=(done % job.stats_every) == 0,
@@ -544,7 +631,6 @@ def run_sequence(
         stitcher_resident=memory.peak_working_set(),
         encoder_resident=encoder_resident,
     )
-    warnings: list[str] = []
     if peak.measured:
         say(peak.report())
         if peak.exceeds(job.memory_soft_limit):
@@ -563,6 +649,8 @@ def run_sequence(
         stages=stages,
         peak=peak,
         warnings=tuple(warnings),
+        device=placement.device,
+        device_detail=placement.detail,
     )
 
 
@@ -711,7 +799,8 @@ class MasterJob:
     1 by default: it costs 0.68 s a frame against 6's 2.77 s for about 10% more bytes
     (AGENTS.md section 8), and a master is an intermediate, so time is worth more than
     the bytes. Pass 0 for literally uncompressed files, at roughly 2.3x the disk."""
-    decode_workers: int = 4
+    decode_workers: int | None = None
+    """As :attr:`SequenceJob.decode_workers`: `None` picks the device's default."""
     warp_threads: int = DEFAULT_THREADS
     sampler: str = DEFAULT_SAMPLER
     feather_power: float = DEFAULT_FEATHER_POWER
@@ -722,23 +811,31 @@ class MasterJob:
     the interpolation and the blend produced between levels, which 8-bit quantisation
     discards. Worth it for a master something later resamples again -- and it is what
     makes an eventual EXR source a drop-in (ROADMAP P4 item 6)."""
-    write_workers: int = 1
-    """PNG encodes in flight.
+    write_workers: int | None = None
+    """PNG encodes in flight. `None` (default) picks :data:`WRITE_WORKERS` for the device
+    the warp lands on: 1 on the CPU, 4 on the GPU.
 
-    One is fastest, measured: at 8K, 1 writer gives 2.40 s/frame (warp 2.06, blocked on
-    the write 0.12) against 2 writers' 2.52 (warp 2.28, blocked 0.02). The second worker
-    hides the write almost completely and pays for it by slowing the warp -- the same
-    trade AGENTS.md section 8 records for the decode pool, where the *total* thread count
-    mattered more than the split. Raise it only if the disk, not the CPU, is the limit.
+    One is fastest on the CPU, measured: at 8K, 1 writer gives 2.40 s/frame (warp 2.06,
+    blocked on the write 0.12) against 2 writers' 2.52 (warp 2.28, blocked 0.02). The
+    second worker hides the write almost completely and pays for it by slowing the warp --
+    the same trade AGENTS.md section 8 records for the decode pool, where the *total*
+    thread count mattered more than the split. On the GPU that trade is gone and the PNG
+    encode is the bottleneck, so 4.
 
-    Also bounds memory: each queued image is 88 MB at 8K."""
+    Also bounds memory: each queued image is 88 MB at 8K (177 MB at 16 bits)."""
     stats_every: int = 100
     resume: bool = True
     memory_soft_limit: int = memory.SOFT_LIMIT_BYTES
+    device: str = device_mod.DEFAULT_DEVICE
+    """As :attr:`SequenceJob.device`."""
 
     def __post_init__(self) -> None:
         if not self.frames:
             raise ValueError("no frames to process")
+        if self.device not in device_mod.DEVICES:
+            raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
+        if self.decode_workers is not None and self.decode_workers < 1:
+            raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
         if self.width < 2 or self.width % 2:
             raise ValueError(f"master width must be even and positive, got {self.width}")
         tile = self.source.tile_size
@@ -752,8 +849,8 @@ class MasterJob:
             raise ValueError(f"compress_level must be 0..9, got {self.compress_level}")
         if self.bit_depth not in BIT_DEPTHS:
             raise ValueError(f"bit_depth must be one of {BIT_DEPTHS}, got {self.bit_depth}")
-        if self.write_workers < 1:
-            raise ValueError("write_workers must be >= 1")
+        if self.write_workers is not None and self.write_workers < 1:
+            raise ValueError("write_workers must be >= 1 (or None for the device's default)")
 
     @property
     def height(self) -> int:
@@ -792,6 +889,8 @@ class MasterSummary:
     stages: StageTimes
     peak: memory.PeakMemory = dataclasses.field(default_factory=memory.PeakMemory)
     warnings: tuple[str, ...] = ()
+    device: str = device_mod.DEFAULT_DEVICE
+    device_detail: str = ""
 
     @property
     def seconds_per_frame(self) -> float:
@@ -848,6 +947,10 @@ def run_master(
         job.feather_power,
     ):
         raise ValueError("the supplied warp plan does not match this job")
+    warnings: list[str] = []
+    warper, placement = _place_plan(plan, job.device, say, warnings)
+    decode_workers = job.decode_workers or default_decode_workers(placement.device)
+    write_workers = job.write_workers or default_write_workers(placement.device)
 
     indices = list(job.rig.unique_indices)
     total = len(job.frames)
@@ -861,7 +964,7 @@ def run_master(
     stages = StageTimes()
 
     def decode(frame: int) -> dict[int, U8]:
-        return io.load_tiles(job.source, frame, indices, workers=job.decode_workers)
+        return io.load_tiles(job.source, frame, indices, workers=decode_workers)
 
     def write_one(frame: int, image: io.Panorama) -> int:
         return io.write_png_atomically(
@@ -873,14 +976,14 @@ def run_master(
     with (
         _CancelScope(stop),
         concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch,
-        concurrent.futures.ThreadPoolExecutor(max_workers=job.write_workers) as writers,
+        concurrent.futures.ThreadPoolExecutor(max_workers=write_workers) as writers,
     ):
         try:
             for frame, tiles, waited in _prefetch_tiles(prefetch, decode, todo):
                 if stop.is_set():
                     raise Cancelled(f"cancelled after {written} of {len(todo)} frame(s)")
                 image, report, warp_seconds, gate_seconds = _stitch_one(
-                    plan,
+                    warper,
                     tiles,
                     threads=job.warp_threads,
                     gate=(done % job.stats_every) == 0,
@@ -896,7 +999,7 @@ def run_master(
                 flight.append(writers.submit(write_one, frame, image))
                 # Keep at most `write_workers` encodes outstanding, so the queue cannot
                 # grow into a pile of 88 MB frames while the disk falls behind.
-                while len(flight) > job.write_workers:
+                while len(flight) > write_workers:
                     bytes_written += flight.popleft().result()
                 blocked = time.time() - write_started
                 stages.decode_wait += waited
@@ -927,7 +1030,6 @@ def run_master(
     peak = memory.PeakMemory(
         stitcher=memory.peak_commit(), stitcher_resident=memory.peak_working_set()
     )
-    warnings: list[str] = []
     if peak.measured:
         say(peak.report())
         if peak.exceeds(job.memory_soft_limit):
@@ -945,4 +1047,6 @@ def run_master(
         stages=stages,
         peak=peak,
         warnings=tuple(warnings),
+        device=placement.device,
+        device_detail=placement.detail,
     )
