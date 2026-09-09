@@ -49,6 +49,7 @@ FFMPEG_DIR = os.environ.get("VRC_FFMPEG_DIR") or None
 datas = [
     (str(GUI / "main_window.ui"), "vr_compose/gui"),
     (str(GUI / "style.qss"), "vr_compose/gui"),
+    (str(GUI / "icon.png"), "vr_compose/gui"),  # the window's icon; the exe's is below
 ]
 
 if FFMPEG_DIR:
@@ -110,6 +111,7 @@ archive = PYZ(analysis.pure)
 # NDJSON pipe from `QProcess` arrives intact, which is what the window's progress needs.
 # `main_ui._attach_parent_console` covers what is left, a start with no streams at all.
 COMMON = dict(
+    icon=str(GUI / "icon.ico"),  # the same picture as icon.png, in the sizes Explorer wants
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

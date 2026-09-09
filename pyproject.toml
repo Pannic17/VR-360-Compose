@@ -45,6 +45,7 @@ packages = ["src/vr_compose"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/vr_compose/gui/main_window.ui" = "vr_compose/gui/main_window.ui"
 "src/vr_compose/gui/style.qss" = "vr_compose/gui/style.qss"
+"src/vr_compose/gui/icon.png" = "vr_compose/gui/icon.png"
 
 [tool.pytest.ini_options]
 minversion = "8.0"

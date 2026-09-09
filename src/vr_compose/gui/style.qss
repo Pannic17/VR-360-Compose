@@ -25,16 +25,6 @@ QLabel#appTitleLabel {
     font-weight: 700;
 }
 
-QLabel#rigBadgeLabel {
-    color: #2563eb;
-    background: #e8f0fe;
-    border: 1px solid #cfe0fd;
-    border-radius: 10px;
-    padding: 3px 10px;
-    font-family: "Consolas", monospace;
-    font-size: 14px;
-}
-
 QLabel#metaLabel,
 QLabel#progressDetailLabel {
     color: #6b7280;

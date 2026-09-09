@@ -31,7 +31,7 @@ import sys
 from typing import Any
 
 from PySide6.QtCore import QObject, QProcess, Qt, Slot
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QIcon, QTextCursor
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import (
     QApplication,
@@ -57,6 +57,9 @@ from vr_compose.stitch import BIT_DEPTHS, DEFAULT_SAMPLER, SAMPLERS
 HERE = pathlib.Path(__file__).resolve().parent
 UI_FILE = HERE / "main_window.ui"
 QSS_FILE = HERE / "style.qss"
+ICON_FILE = HERE / "icon.png"
+"""The application icon (user, 2026-09-09). The executable carries the same picture as
+`icon.ico` through the PyInstaller spec; this copy is for the window and the taskbar."""
 
 CHOOSE_STEM = "— 请选择 —"
 """Placeholder shown when a directory holds several renders.
@@ -106,6 +109,7 @@ class ComposeWindow(QMainWindow):
         loaded = self._load_ui()
         self.base_title = f"{loaded.windowTitle()}  {__version__}"
         self.setWindowTitle(self.base_title)
+        self.setWindowIcon(QIcon(str(ICON_FILE)))
         self.resize(loaded.size())
         central = loaded.takeCentralWidget()
         if central is None:
@@ -138,7 +142,6 @@ class ComposeWindow(QMainWindow):
         return widget
 
     def _bind_widgets(self) -> None:
-        self.rig_badge: QLabel = self._child(QLabel, "rigBadgeLabel")
         self.status_banner: QLabel = self._child(QLabel, "statusBannerLabel")
         self.source_edit: QLineEdit = self._child(QLineEdit, "sourceLineEdit")
         self.browse_source: QPushButton = self._child(QPushButton, "browseSourceButton")
@@ -219,7 +222,6 @@ class ComposeWindow(QMainWindow):
                 "`<stem>.<帧号>.png`（直接放在里面或再下一层都行）。"
             )
             self._set_stems([])
-            self.rig_badge.setText("rig —")
             self.set_status("fail", "无来源")
             return
 
@@ -260,7 +262,6 @@ class ComposeWindow(QMainWindow):
             return
         try:
             rig = rig_for(chosen.camera_count)
-            self.rig_badge.setText(f"rig {rig.name}")
             tile = chosen.tile_size
             native = rig.native_width(tile) if tile else 0
             frames = chosen.frames
@@ -285,7 +286,6 @@ class ComposeWindow(QMainWindow):
                     )
             self.set_status("pending", "就绪")
         except UnknownRigError as exc:
-            self.rig_badge.setText("rig 未登记")
             self.log(f"装配不认识：{exc}")
             self.start_button.setEnabled(False)
             self.set_status("fail", "装配未登记")
@@ -603,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("VR-Compose")
     app.setApplicationVersion(__version__)
+    app.setWindowIcon(QIcon(str(ICON_FILE)))
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, True)
     window = ComposeWindow()
     window.show()

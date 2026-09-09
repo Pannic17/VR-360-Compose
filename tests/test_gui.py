@@ -30,7 +30,7 @@ pytest.importorskip("PySide6", reason="the GUI needs PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QProcess
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel
 
 from vr_compose.gui.window import CHOOSE_STEM, ComposeWindow, worker_command
 
@@ -168,7 +168,6 @@ def test_a_valid_source_fills_in_the_rig_and_a_safe_frame_range(
     try:
         window.source_edit.setText(str(tmp_path / "src"))
         window.discover()
-        assert window.rig_badge.text() == "rig of3d-20"
         assert window.status_banner.property("status") == "pending"
         assert window.start_button.isEnabled()
         # 0 is not contiguous with 5..7, so the prefill is the tail and the log says why
@@ -578,5 +577,20 @@ def test_the_gui_asks_for_auto_never_cuda(qt_app: QApplication, tmp_path: pathli
             assert argv is not None
             assert argv[argv.index("--device") + 1] == "auto"
             assert "cuda" not in argv
+    finally:
+        window.close()
+
+
+def test_the_window_carries_the_application_icon(qt_app: QApplication) -> None:
+    """The icon the user chose (2026-09-09) is shipped beside the .ui and set on the window
+    and the application, so the title bar and the taskbar show it -- packaged or not. The
+    executable itself gets the same picture as `icon.ico` through the spec."""
+    from vr_compose.gui.window import HERE, ICON_FILE
+
+    assert ICON_FILE.is_file() and (HERE / "icon.ico").is_file()
+    window = ComposeWindow()
+    try:
+        assert not window.windowIcon().isNull()
+        assert window.findChild(QLabel, "rigBadgeLabel") is None, "the rig badge was removed"
     finally:
         window.close()
