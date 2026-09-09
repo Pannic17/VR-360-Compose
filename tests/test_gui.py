@@ -457,6 +457,85 @@ def test_the_root_entry_point_is_both_faces(monkeypatch: pytest.MonkeyPatch) -> 
     assert [face for face, _ in called] == ["gui"], called
 
 
+def test_the_single_file_build_has_no_console_to_show() -> None:
+    """The fix for the black window behind the single-file window (2026-09-09).
+
+    That shape used to be a console build that hid its own console, which could not work:
+    the console belongs to the *bootloader* and is on screen before any of this code runs,
+    so it stayed for the whole 494 MiB unpack. Measured with a 70 MiB stand-in: visible
+    about four seconds with the hide (and a taskbar button afterwards), never visible at
+    all when windowed.
+
+    The folder build keeps its console on purpose -- it starts in 0.35 s, so hiding is
+    enough, and a console process is one PowerShell waits for. Asserted on the spec's text
+    because only a real build could show it, and a build takes minutes; but this one line
+    is exactly what would bring the black window back.
+    """
+    import re
+
+    spec = (pathlib.Path(__file__).resolve().parents[1] / "VR-Compose.spec").read_text(
+        encoding="utf-8"
+    )
+    # The assignment, not the prose: the comment above it explains both sides.
+    settings = re.findall(r"^\s*console=(.+),", spec, re.MULTILINE)
+    assert settings == ["not ONEFILE"], f"expected one shape-dependent setting, got {settings}"
+
+
+def test_the_folder_build_hides_a_console_that_is_only_its_own() -> None:
+    """What "the console was made for us" means, for the shape that still has one.
+
+    Counting processes is the wrong test and was the original bug: a single-file build is
+    a bootloader plus its child on one console, so `== 1` answered no for it (measured
+    pids 44056 / 54872). That shape is windowed now, but the folder build still hides its
+    console, and the rule has to keep saying no to a shell's console -- hiding that would
+    take away somebody's terminal.
+    """
+    import os
+
+    import main_ui
+
+    us = "d:/dist/vr-compose/vr-compose.exe"
+    images = {os.getpid(): us}
+
+    def image_of(pid: int) -> str | None:
+        return images.get(pid)
+
+    assert main_ui.console_is_only_ours([os.getpid()], image_of) is True, "double-click"
+
+    images[44056] = us  # a second process of our own, as the single-file bootloader was
+    assert main_ui.console_is_only_ours([44056, os.getpid()], image_of) is True
+
+    images[777] = "c:/windows/system32/cmd.exe"
+    assert main_ui.console_is_only_ours([777, os.getpid()], image_of) is False, (
+        "launched from a shell: hiding that window would take away someone's terminal"
+    )
+    assert main_ui.console_is_only_ours([999, os.getpid()], image_of) is False, (
+        "a process we cannot identify counts as somebody else's"
+    )
+    assert main_ui.console_is_only_ours([], image_of) is False, "an unreadable list hides nothing"
+    assert main_ui.console_is_only_ours([os.getpid()], lambda _pid: None) is False, (
+        "if we cannot even identify ourselves, do nothing"
+    )
+
+
+def test_the_command_line_face_only_touches_streams_that_are_missing() -> None:
+    """The window hands a render *pipes*, and those pipes are the progress channel.
+
+    So the console-borrowing in the CLI face has to be able to tell "nobody gave me
+    anywhere to write" from "I have been handed a pipe" -- rebinding the latter would
+    send NDJSON progress to a console instead of to the `QProcess` reading it.
+    """
+    import io
+
+    import main_ui
+
+    pipe = io.StringIO()
+    assert main_ui.needs_streams(pipe, pipe) is False, "a pipe is somewhere to write"
+    assert main_ui.needs_streams(None, None) is True
+    assert main_ui.needs_streams(pipe, None) is True, "one missing stream is enough"
+    assert main_ui.needs_streams(None, pipe) is True
+
+
 def test_the_entry_point_calls_freeze_support_first() -> None:
     """AGENTS.md constraint 4: without it every frozen pool worker starts a fresh GUI,
     recursively. Asserted on the source text because the failure only shows up in a

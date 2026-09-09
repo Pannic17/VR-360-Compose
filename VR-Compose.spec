@@ -78,16 +78,39 @@ analysis = Analysis(
 
 archive = PYZ(analysis.pure)
 
-# A console is wanted: the window is only one of this executable's two faces, and the
-# other one is a command line whose output has to land somewhere. A windowed build
-# leaves `sys.stdout` as None, which breaks the CLI face and the window's NDJSON pipe at
-# once. `main_ui._hide_own_console` hides it for a double-click.
+# **The console is the folder build's, and the single-file build has none.** This is one
+# line with a measured reason on both sides (2026-09-09):
+#
+# *Single file* -- `console=False`. Its console belongs to the **bootloader** and is on
+# screen before any of this project's code runs, so it cannot be hidden until the whole
+# 494 MiB archive has been unpacked. A/B with a 70 MiB stand-in, sampling the desktop
+# every 0.4 s: with a console and no hiding, a 1129x635 terminal window stayed up; with
+# the hiding, the same window was visible about four seconds and then left a taskbar
+# button; windowed, no console window appeared at any point. The real archive unpacks for
+# far longer than four seconds, which is what the user reported as "it still pops up a
+# command line window".
+#
+# *Folder* -- `console=True`, hidden by `main_ui._hide_own_console` for a double-click.
+# It starts in 0.35 s and is a single process, so the console goes before it can be seen,
+# and keeping it buys the thing a windowed build gives up: **PowerShell waits for a
+# console process.** Measured on the windowed build, `VR-Compose.exe --version` typed bare
+# into PowerShell prints nothing and sets no exit code, because the shell does not wait
+# for a GUI-subsystem process; through a pipe, `cmd`, or `Start-Process -Wait` it is
+# correct. So the shape people script against keeps its console, and the shape people
+# double-click has none.
+#
+# What a windowed build does *not* lose, contrary to the note that used to be here: it
+# does not leave `sys.stdout` as None whenever it is frozen. Windows attaches a new
+# process to its parent's console whatever the subsystem says -- the subsystem only
+# decides whether a *new* console is allocated when there is no parent one. Measured: the
+# NDJSON pipe from `QProcess` arrives intact, which is what the window's progress needs.
+# `main_ui._attach_parent_console` covers what is left, a start with no streams at all.
 COMMON = dict(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=not ONEFILE,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
