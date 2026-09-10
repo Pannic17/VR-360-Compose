@@ -1009,8 +1009,11 @@ windowed 的副作用是好的那种：未捕获异常弹**对话框**，而不�
 | 覆盖门槛 | 格内权重 < 该 tile 最大格的 5% 不信 | 边缘只有几个样本的格不代表这台相机看到的东西 |
 
 **应用**：`WarpPlan.apply(corrections=...)` 与 GPU 核函数各减去校正网格的双线性上采样值
-（`warp.upsample_grid`，两边逐语句同序），**CPU/GPU 仍逐字节一致**（tests/test_warp_gpu.py 含校正
-比对）。`corrections=None` 时一个字节不变，P1 基准与指标 D 保留。估计在**解码预取线程**里做
+（`warp.upsample_grid`，两边逐语句同序）。**带校正的 CPU/GPU 逐字节一致目前没有测试守着**：
+tests/test_warp_gpu.py 只比对未校正的路径，tests/test_harmonise.py 只跑 CPU，靠的是「同序转写」
+这条纪律本身。要守住就给 `test_gpu_matches_the_cpu_plan_byte_for_byte` 加一个带校正的参数——
+那批用例本来就由 cupy 与显卡门控，没卡的机器照旧跳过。`corrections=None` 时一个字节不变
+（这条有测试），P1 基准与指标 D 保留。估计在**解码预取线程**里做
 （`pipeline._preparer`），与上一帧的 warp/写盘重叠。
 
 **效果**（8K catmullrom，默认设置，`vr-compose frame`）：
