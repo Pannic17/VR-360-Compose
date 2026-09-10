@@ -45,7 +45,7 @@ import numpy as np
 import numpy.typing as npt
 
 from vr_compose import device as device_mod
-from vr_compose import encode, io, memory, verify
+from vr_compose import encode, harmonise, io, memory, verify
 from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
@@ -92,6 +92,9 @@ WRITE_WORKERS = {"cpu": 1, "cuda": 4}
 On the CPU a second writer slows the warp (2.40 -> 2.52 s/frame at 8K, AGENTS.md section
 8, P3). On the GPU the warp is 0.06-0.14 s and the PNG encode is the whole cost: 1 -> 4
 writers took 8-bit masters from 1.26 to 0.51 s/frame and 16-bit from 4.68 to 1.54."""
+
+
+GATES = ("on", "off")
 
 
 def default_decode_workers(device: str) -> int:
@@ -251,6 +254,13 @@ class SequenceJob:
     device: str = device_mod.DEFAULT_DEVICE
     """Where the warp runs. `cpu` (default) always; `cuda` only if the machine qualifies,
     otherwise the run warns and uses the CPU -- see :mod:`vr_compose.device`."""
+    harmonise: bool = harmonise.DEFAULT_HARMONISE
+    """Take the smooth brightness differences between cameras out before blending (P9,
+    :mod:`vr_compose.harmonise`). On by default so renders with per-view fog, exposure or
+    motion blur come out clean and pass the gate; off reproduces P1's arithmetic exactly."""
+    gate: str = "on"
+    """`on`: sample metric A every `stats_every` frames, warn above the warning tier and
+    stop above the fatal one. `off`: never compute it."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -261,6 +271,8 @@ class SequenceJob:
             raise ValueError(f"output must be an .mp4 path, got {self.output}")
         if self.device not in device_mod.DEVICES:
             raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
+        if self.gate not in GATES:
+            raise ValueError(f"gate must be one of {GATES}, got {self.gate!r}")
         if self.decode_workers is not None and self.decode_workers < 1:
             raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
 
@@ -327,6 +339,7 @@ class StageTimes:
     """
 
     decode_wait: float = 0.0
+    harmonise: float = 0.0
     warp: float = 0.0
     gate: float = 0.0
     write: float = 0.0
@@ -335,8 +348,9 @@ class StageTimes:
     def report(self) -> str:
         n = max(self.frames, 1)
         return (
-            f"per frame: wait-for-decode {self.decode_wait / n:.2f} s, warp {self.warp / n:.2f} s, "
-            f"gate {self.gate / n:.2f} s, write {self.write / n:.2f} s"
+            f"per frame: wait-for-decode {self.decode_wait / n:.2f} s "
+            f"(incl. harmonise {self.harmonise / n:.2f} s in the prefetch thread), "
+            f"warp {self.warp / n:.2f} s, gate {self.gate / n:.2f} s, write {self.write / n:.2f} s"
         )
 
 
@@ -358,31 +372,50 @@ class Summary:
     device: str = device_mod.DEFAULT_DEVICE
     """Where the warp actually ran -- `cpu` after a fallback, whatever was asked for."""
     device_detail: str = ""
+    harmonised: bool = False
 
     @property
     def seconds_per_frame(self) -> float:
         return self.seconds / self.encoded if self.encoded else 0.0
 
 
-def _prefetch_tiles(
-    pool: concurrent.futures.ThreadPoolExecutor,
-    load: Callable[[int], dict[int, U8]],
-    frames: Sequence[int],
-) -> Iterable[tuple[int, dict[int, U8], float]]:
-    """Yield `(frame, tiles, seconds blocked)`, decoding the next frame while you work.
+PREFETCH_DEPTH = 2
+"""Frames prepared ahead of the one being warped, on as many threads.
 
-    One frame of lookahead, which is all that is useful: at 8K the 15 decodes take about
-    0.3 s against a 1.9 s warp, so the measured wait is 0.01 s. Shared by the MP4 and the
-    master paths so both get the overlap and neither reimplements it.
+One was enough while preparing a frame meant decoding it: 0.3 s of decode against a 1.9 s
+CPU warp. Since P9 the harmonisation estimate rides along (0.3-0.4 s of numpy, most of it
+with the GIL released), and on the GPU path the warp and write it has to hide behind take
+only 0.2 s -- with one thread 0.3 s a frame showed through (0.93 s/frame against 0.48
+without harmonisation). Two in flight overlap two prepares with one warp. Costs one more
+frame of tiles in memory (166 MB at 1920-pixel tiles)."""
+
+
+def _prefetch_tiles[T](
+    pool: concurrent.futures.ThreadPoolExecutor,
+    load: Callable[[int], T],
+    frames: Sequence[int],
+    depth: int = PREFETCH_DEPTH,
+) -> Iterable[tuple[int, T, float]]:
+    """Yield `(frame, load(frame), seconds blocked)`, preparing frames ahead while you work.
+
+    `depth` frames are in flight on the pool (size the pool to match). Shared by the MP4
+    and the master paths so both get the overlap and neither reimplements it. Since P9 the
+    harmonisation estimate rides along in `load`: it only needs the tiles, and done here it
+    overlaps the current frame's warp and write instead of adding to them. Frames are still
+    yielded strictly in order.
     """
     if not frames:
         return
-    pending = pool.submit(load, frames[0])
+    depth = max(1, depth)
+    pending: collections.deque[concurrent.futures.Future[T]] = collections.deque()
+    for frame in frames[:depth]:
+        pending.append(pool.submit(load, frame))
     for position, frame in enumerate(frames):
         tick = time.time()
-        tiles = pending.result()
-        if position + 1 < len(frames):
-            pending = pool.submit(load, frames[position + 1])
+        tiles = pending.popleft().result()
+        ahead = position + depth
+        if ahead < len(frames):
+            pending.append(pool.submit(load, frames[ahead]))
         yield frame, tiles, time.time() - tick
 
 
@@ -390,7 +423,13 @@ class Warper(Protocol):
     """What the per-frame loop needs: :class:`WarpPlan` or its GPU twin."""
 
     def apply(
-        self, tiles: dict[int, U8], *, with_stats: bool, threads: int, bit_depth: int
+        self,
+        tiles: dict[int, U8],
+        *,
+        with_stats: bool,
+        threads: int,
+        bit_depth: int,
+        corrections: dict[int, npt.NDArray[np.float32]] | None,
     ) -> StitchResult: ...
 
 
@@ -435,14 +474,86 @@ def _place_plan(
 
 
 def _stitch_one(
-    plan: Warper, tiles: dict[int, U8], *, threads: int, gate: bool, bit_depth: int = 8
+    plan: Warper,
+    tiles: dict[int, U8],
+    *,
+    threads: int,
+    gate: bool,
+    bit_depth: int = 8,
+    corrections: harmonise.Corrections | None = None,
 ) -> tuple[io.Panorama, verify.Agreement | None, float, float]:
     """One frame: `(image, gate report or None, warp seconds, gate seconds)`."""
     started = time.time()
-    result = plan.apply(tiles, with_stats=gate, threads=threads, bit_depth=bit_depth)
+    result = plan.apply(
+        tiles,
+        with_stats=gate,
+        threads=threads,
+        bit_depth=bit_depth,
+        corrections=corrections.grids if corrections is not None else None,
+    )
     warped = time.time()
     report = verify.agreement(result.stats) if gate else None
     return result.image, report, warped - started, time.time() - warped
+
+
+Prepared = tuple[dict[int, U8], "harmonise.Corrections | None", float]
+"""What the prefetch thread hands over: tiles, their corrections (or None), estimate seconds."""
+
+
+def _preparer(
+    source: SourceSet,
+    indices: list[int],
+    decode_workers: int,
+    harmoniser: harmonise.Harmoniser | None,
+) -> Callable[[int], Prepared]:
+    def prepare(frame: int) -> Prepared:
+        tiles = io.load_tiles(source, frame, indices, workers=decode_workers)
+        if harmoniser is None:
+            return tiles, None, 0.0
+        tick = time.time()
+        corrections = harmoniser.estimate(tiles)
+        return tiles, corrections, time.time() - tick
+
+    return prepare
+
+
+def _harmoniser_for(
+    enabled: bool, rig: Rig, tile_size: int, feather_power: float, say: Callable[[str], None]
+) -> harmonise.Harmoniser | None:
+    if not enabled:
+        return None
+    built = harmonise.Harmoniser(rig, tile_size, feather_power=feather_power)
+    say(
+        f"harmonise on: {built.width}x{built.height} estimation plan built in "
+        f"{built.build_seconds:.1f} s; corrections on a {harmonise.GRID[1]}x{harmonise.GRID[0]} "
+        f"grid, clamped to {harmonise.CLAMP:.0f} levels"
+    )
+    return built
+
+
+def _judge(
+    report: verify.Agreement,
+    frame: int,
+    corrections: harmonise.Corrections | None,
+    warnings: list[str],
+    say: Callable[[str], None],
+) -> None:
+    """Apply the two tiers: stop on a rig-level disagreement, warn on a content-level one."""
+    if corrections is not None:
+        say(corrections.describe())
+    if report.fatal:
+        raise GeometryGateFailed(
+            f"frame {frame} failed the overlap-agreement gate:" + "\n" + report.report()
+        )
+    if not report.passed:
+        warning = (
+            f"frame {frame}: overlapping tiles disagree beyond the warning tier (median "
+            f"{report.median:.2f}, mean {report.mean:.2f}; stop is {verify.GATE_FATAL_MEDIAN} / "
+            f"{verify.GATE_FATAL_MEAN}). The rig looks right; the cameras rendered different "
+            f"content there (fog, exposure, motion blur). Continuing."
+        )
+        warnings.append(warning)
+        say(f"WARNING: {warning}")
 
 
 def _delivery_frame(image: io.Panorama) -> U8:
@@ -522,6 +633,7 @@ def run_sequence(
     warnings: list[str] = []
     warper, placement = _place_plan(plan, job.device, say, warnings)
     decode_workers = job.decode_workers or default_decode_workers(placement.device)
+    harmoniser = _harmoniser_for(job.harmonise, job.rig, tile_size, job.feather_power, say)
 
     indices = list(job.rig.unique_indices)
     segments = job.segments()
@@ -537,11 +649,13 @@ def run_sequence(
     encoder_commit = 0
     encoder_resident = 0
 
-    def decode(frame: int) -> dict[int, U8]:
-        return io.load_tiles(job.source, frame, indices, workers=decode_workers)
+    prepare = _preparer(job.source, indices, decode_workers, harmoniser)
 
     stop = cancel if cancel is not None else threading.Event()
-    with _CancelScope(stop), concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch:
+    with (
+        _CancelScope(stop),
+        concurrent.futures.ThreadPoolExecutor(max_workers=PREFETCH_DEPTH) as prefetch,
+    ):
         for seg_index, seg_frames in segments:
             if stop.is_set():
                 raise Cancelled(f"cancelled after {done} of {total} frame(s)")
@@ -560,26 +674,25 @@ def run_sequence(
 
             writer = encode.SegmentWriter(tools, job.spec, path)
             try:
-                for frame, tiles, waited in _prefetch_tiles(prefetch, decode, seg_frames):
+                for frame, prepared, waited in _prefetch_tiles(prefetch, prepare, seg_frames):
                     if stop.is_set():
                         raise Cancelled(f"cancelled after {done} of {total} frame(s)")
+                    tiles, corrections, harmonise_seconds = prepared
                     image, report, warp_seconds, gate_seconds = _stitch_one(
                         warper,
                         tiles,
                         threads=job.warp_threads,
-                        gate=(done % job.stats_every) == 0,
+                        gate=job.gate == "on" and (done % job.stats_every) == 0,
+                        corrections=corrections,
                     )
                     if report is not None:
                         reports.append(report)
-                        if not report.passed:
-                            raise GeometryGateFailed(
-                                f"frame {frame} failed the overlap-agreement gate:\n"
-                                f"{report.report()}"
-                            )
+                        _judge(report, frame, corrections, warnings, say)
                     write_started = time.time()
                     writer.write(_delivery_frame(image))
                     written = time.time()
                     stages.decode_wait += waited
+                    stages.harmonise += harmonise_seconds
                     stages.warp += warp_seconds
                     stages.gate += gate_seconds
                     stages.write += written - write_started
@@ -656,6 +769,7 @@ def run_sequence(
         warnings=tuple(warnings),
         device=placement.device,
         device_detail=placement.detail,
+        harmonised=harmoniser is not None,
     )
 
 
@@ -833,12 +947,18 @@ class MasterJob:
     memory_soft_limit: int = memory.SOFT_LIMIT_BYTES
     device: str = device_mod.DEFAULT_DEVICE
     """As :attr:`SequenceJob.device`."""
+    harmonise: bool = harmonise.DEFAULT_HARMONISE
+    """As :attr:`SequenceJob.harmonise`."""
+    gate: str = "on"
+    """As :attr:`SequenceJob.gate`."""
 
     def __post_init__(self) -> None:
         if not self.frames:
             raise ValueError("no frames to process")
         if self.device not in device_mod.DEVICES:
             raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
+        if self.gate not in GATES:
+            raise ValueError(f"gate must be one of {GATES}, got {self.gate!r}")
         if self.decode_workers is not None and self.decode_workers < 1:
             raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
         if self.width < 2 or self.width % 2:
@@ -896,6 +1016,7 @@ class MasterSummary:
     warnings: tuple[str, ...] = ()
     device: str = device_mod.DEFAULT_DEVICE
     device_detail: str = ""
+    harmonised: bool = False
 
     @property
     def seconds_per_frame(self) -> float:
@@ -956,6 +1077,7 @@ def run_master(
     warper, placement = _place_plan(plan, job.device, say, warnings)
     decode_workers = job.decode_workers or default_decode_workers(placement.device)
     write_workers = job.write_workers or default_write_workers(placement.device)
+    harmoniser = _harmoniser_for(job.harmonise, job.rig, tile_size, job.feather_power, say)
 
     indices = list(job.rig.unique_indices)
     total = len(job.frames)
@@ -968,8 +1090,7 @@ def run_master(
     reports: list[verify.Agreement] = []
     stages = StageTimes()
 
-    def decode(frame: int) -> dict[int, U8]:
-        return io.load_tiles(job.source, frame, indices, workers=decode_workers)
+    prepare = _preparer(job.source, indices, decode_workers, harmoniser)
 
     def write_one(frame: int, image: io.Panorama) -> int:
         return io.write_png_atomically(
@@ -980,26 +1101,26 @@ def run_master(
     flight: collections.deque[concurrent.futures.Future[int]] = collections.deque()
     with (
         _CancelScope(stop),
-        concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch,
+        concurrent.futures.ThreadPoolExecutor(max_workers=PREFETCH_DEPTH) as prefetch,
         concurrent.futures.ThreadPoolExecutor(max_workers=write_workers) as writers,
     ):
         try:
-            for frame, tiles, waited in _prefetch_tiles(prefetch, decode, todo):
+            for frame, prepared, waited in _prefetch_tiles(prefetch, prepare, todo):
                 if stop.is_set():
                     raise Cancelled(f"cancelled after {written} of {len(todo)} frame(s)")
+                tiles, corrections, harmonise_seconds = prepared
                 image, report, warp_seconds, gate_seconds = _stitch_one(
                     warper,
                     tiles,
                     threads=job.warp_threads,
-                    gate=(done % job.stats_every) == 0,
+                    gate=job.gate == "on" and (done % job.stats_every) == 0,
                     bit_depth=job.bit_depth,
+                    corrections=corrections,
                 )
                 if report is not None:
                     reports.append(report)
-                    if not report.passed:
-                        raise GeometryGateFailed(
-                            f"frame {frame} failed the overlap-agreement gate:\n{report.report()}"
-                        )
+                    _judge(report, frame, corrections, warnings, say)
+                stages.harmonise += harmonise_seconds
                 write_started = time.time()
                 flight.append(writers.submit(write_one, frame, image))
                 # Keep at most `write_workers` encodes outstanding, so the queue cannot
@@ -1054,4 +1175,5 @@ def run_master(
         warnings=tuple(warnings),
         device=placement.device,
         device_detail=placement.detail,
+        harmonised=harmoniser is not None,
     )

@@ -31,7 +31,7 @@ from collections.abc import Sequence
 
 from tqdm import tqdm
 
-from vr_compose import __version__, encode, io, pipeline, spherical, verify
+from vr_compose import __version__, encode, harmonise, io, pipeline, spherical, verify
 from vr_compose import device as device_mod
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
@@ -214,21 +214,31 @@ def cmd_frame(args: argparse.Namespace) -> int:
         print(f"WARNING    : {placement.warning}")
     elif placement.note:
         print(f"warp       : cpu ({placement.note})")
-    if placement.device == "cuda":
-        # The plan is the verified geometry evaluated once; the GPU only applies it. Same
-        # bytes as `stitch_frame` -- tests/test_warp_gpu.py holds that line.
-        from vr_compose import warp_gpu
-
+    corrections = None
+    if args.harmonise:
+        harmoniser = harmonise.Harmoniser(rig, tile, feather_power=args.feather_power)
+        corrections = harmoniser.estimate(tiles)
+        print(f"harmonise  : {corrections.describe()}")
+    if placement.device == "cuda" or corrections is not None:
+        # The plan is the verified geometry evaluated once; the GPU (or the CPU, when a
+        # correction is applied) only applies it. Uncorrected it is byte-identical to
+        # `stitch_frame` -- tests/test_warp.py and test_warp_gpu.py hold that line.
         plan = WarpPlan.build(
             rig, width, width // 2, tile, band_rows=args.band_rows,
             sampler=args.sampler, feather_power=args.feather_power,
         )  # fmt: skip
-        gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
-        print(
-            f"warp       : cuda ({placement.detail}), plan built in {plan.build_seconds:.1f} s, "
-            f"resident in {gpu.upload_seconds:.1f} s"
-        )
-        result = gpu.apply(tiles, with_stats=True, bit_depth=args.bit_depth)
+        grids = corrections.grids if corrections is not None else None
+        if placement.device == "cuda":
+            from vr_compose import warp_gpu
+
+            gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
+            print(
+                f"warp       : cuda ({placement.detail}), plan built in "
+                f"{plan.build_seconds:.1f} s, resident in {gpu.upload_seconds:.1f} s"
+            )
+            result = gpu.apply(tiles, with_stats=True, bit_depth=args.bit_depth, corrections=grids)
+        else:
+            result = plan.apply(tiles, with_stats=True, bit_depth=args.bit_depth, corrections=grids)
     else:
         result = stitch_frame(
             tiles,
@@ -252,12 +262,25 @@ def cmd_frame(args: argparse.Namespace) -> int:
     if args.out is not None:
         size = io.write_png_atomically(args.out, result.image, compress_level=args.compress_level)
         print(f"wrote      : {args.out}  ({size / 2**20:.1f} MiB)")
-    return 0 if report.passed else 1
+    return 0 if not report.fatal else 1
 
 
 def _describe_device(device: str, detail: str) -> str:
     return f"{device} ({detail})" if detail else device
 
+
+HARMONISE_HELP = (
+    "take the smooth brightness differences between cameras (per-view fog, exposure, "
+    "motion blur) out before blending; edges and texture are untouched. On by default so "
+    "such renders pass the gate and blend without tile-shaped patches; --no-harmonise "
+    "reproduces the P1 arithmetic byte for byte"
+)
+
+GATE_HELP = (
+    "the overlap-agreement gate sampled every --stats-every frames: 'on' (default) warns "
+    "above median 1.0 / mean 1.5 and stops above 2.5 / 4.0 -- only a wrong rig gets that "
+    "far; 'off' skips it"
+)
 
 DEVICE_HELP = (
     "where the warp runs. 'cpu' (default) is the byte-exact reference; 'cuda' gives the "
@@ -338,6 +361,8 @@ def cmd_master(
             stats_every=args.stats_every,
             resume=not args.no_resume,
             device=args.device,
+            harmonise=args.harmonise,
+            gate=args.gate,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -438,12 +463,15 @@ def cmd_master(
         )
         report.say(f"stages     : {summary.stages.report()}")
     report.say(f"warp       : {_describe_device(summary.device, summary.device_detail)}")
+    report.say(f"harmonise  : {'on' if summary.harmonised else 'off'}")
     if summary.skipped:
         report.say(f"resumed    : {summary.skipped} master(s) were already present")
     if summary.gate_reports:
         worst = max(gate.median for gate in summary.gate_reports)
         gates = len(summary.gate_reports)
-        report.say(f"geometry   : {gates} sampled frame(s) PASS, worst median {worst:.2f}")
+        warned = sum(not gate.passed for gate in summary.gate_reports)
+        state = f"{warned} WARN" if warned else "PASS"
+        report.say(f"geometry   : {gates} sampled frame(s) {state}, worst median {worst:.2f}")
     if summary.peak.measured:
         report.say(f"memory     : {summary.peak.report()}")
     for warning in summary.warnings:
@@ -521,6 +549,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             keep_segments=args.keep_segments,
             spherical=None if args.no_spherical else spherical.Spherical(),
             device=args.device,
+            harmonise=args.harmonise,
+            gate=args.gate,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -629,6 +659,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         )
         report.say(f"stages     : {summary.stages.report()}")
     report.say(f"warp       : {_describe_device(summary.device, summary.device_detail)}")
+    report.say(f"harmonise  : {'on' if summary.harmonised else 'off'}")
     if summary.peak.measured:
         report.say(f"memory     : {summary.peak.report()}")
     if summary.skipped_segments:
@@ -636,7 +667,9 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     gates = summary.gate_reports
     if gates:
         worst = max(gate.median for gate in gates)
-        report.say(f"geometry   : {len(gates)} sampled frame(s) PASS, worst median {worst:.2f}")
+        warned = sum(not gate.passed for gate in gates)
+        state = f"{warned} WARN" if warned else "PASS"
+        report.say(f"geometry   : {len(gates)} sampled frame(s) {state}, worst median {worst:.2f}")
     stream = summary.stream
     report.say(
         f"stream     : {stream.codec} {stream.profile} L{stream.level} {stream.tag} "
@@ -740,6 +773,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=DEVICE_HELP,
     )  # fmt: skip
     frame.add_argument(
+        "--harmonise", action=argparse.BooleanOptionalAction, default=harmonise.DEFAULT_HARMONISE,
+        help=HARMONISE_HELP,
+    )  # fmt: skip
+    frame.add_argument("--gate", choices=list(pipeline.GATES), default="on", help=GATE_HELP)
+    frame.add_argument(
         "--bit-depth", type=int, default=8, choices=list(BIT_DEPTHS), help="output PNG depth"
     )
     frame.add_argument(
@@ -809,6 +847,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--device", choices=list(device_mod.DEVICES), default=device_mod.DEFAULT_DEVICE,
         help=DEVICE_HELP,
     )  # fmt: skip
+    sequence.add_argument(
+        "--harmonise", action=argparse.BooleanOptionalAction, default=harmonise.DEFAULT_HARMONISE,
+        help=HARMONISE_HELP,
+    )  # fmt: skip
+    sequence.add_argument("--gate", choices=list(pipeline.GATES), default="on", help=GATE_HELP)
     sequence.add_argument(
         "--feather-power",
         type=float,

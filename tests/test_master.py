@@ -44,7 +44,9 @@ def still_source(tmp_path_factory: pytest.TempPathFactory) -> source.SourceSet:
 
 
 def _job(src: source.SourceSet, directory: pathlib.Path, **overrides: object) -> pipeline.MasterJob:
-    options: dict[str, object] = dict(stats_every=2, width=NATIVE)
+    # harmonise=False for speed (see tests/test_pipeline.py); the default is covered by
+    # test_harmonised_masters_equal_the_frame_command below.
+    options: dict[str, object] = dict(stats_every=2, width=NATIVE, harmonise=False)
     options.update(overrides)
     return pipeline.MasterJob(
         source=src,
@@ -63,8 +65,11 @@ def test_master_pixels_equal_the_frame_command(
     Byte equality of the *files* additionally needs the same compress_level, since zlib
     level changes the encoding and not the image -- so both are asserted, separately.
     """
-    summary = pipeline.run_master(_job(still_source, tmp_path / "out", compress_level=6))
-    assert summary.written == len(FRAMES)
+    # the comparison is with `stitch_frame`, the uncorrected reference (harmonise=False is
+    # the helper's default); the default (on) is covered by the next test
+    job = _job(still_source, tmp_path / "out", compress_level=6)
+    summary = pipeline.run_master(job)
+    assert summary.written == len(FRAMES) and summary.harmonised is False
 
     rig = rig_for(still_source.camera_count)
     tiles = io.load_tiles(still_source, FRAMES[0], list(rig.unique_indices))
@@ -339,3 +344,24 @@ def test_write_workers_default_follows_the_device(
     asked.clear()
     pipeline.run_master(_job(still_source, tmp_path / "explicit", write_workers=2))
     assert asked == [], "an explicit value bypasses the default"
+
+
+def test_harmonised_masters_equal_the_frame_command(
+    still_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """With the real default (harmonise on) the master sink and the `frame` command must
+    still agree pixel for pixel: the correction is estimated from the same tiles by the
+    same code, so both paths see the same grids."""
+    from vr_compose.cli import main
+
+    summary = pipeline.run_master(
+        _job(still_source, tmp_path / "out", compress_level=6, harmonise=True)
+    )
+    assert summary.harmonised is True and summary.written == len(FRAMES)
+    single = tmp_path / "frame.png"
+    argv = ["--source", str(still_source.root), "frame", "--frame", str(FRAMES[0]),
+            "--width", str(NATIVE), "--out", str(single), "--compress-level", "6"]  # fmt: skip
+    assert main(argv) == 0
+    written = tmp_path / "out" / f"S_S_{FRAMES[0]:04d}.png"
+    with Image.open(written) as a, Image.open(single) as b:
+        assert np.array_equal(np.asarray(a), np.asarray(b))

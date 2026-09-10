@@ -9,6 +9,7 @@ wrong rig before it wastes a run.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import hashlib
 import pathlib
@@ -153,7 +154,12 @@ def moving_source(tmp_path_factory: pytest.TempPathFactory) -> source.SourceSet:
 def _job(
     src: source.SourceSet, out: pathlib.Path, codec: str = "h264", **overrides: object
 ) -> SequenceJob:
-    options: dict[str, object] = dict(segment_gops=1, stats_every=50, keep_segments=True)
+    # harmonise=False here: the estimator costs ~0.5 s a frame whatever the tile size, which
+    # would put minutes on every 130-frame run below. The feature has its own tests at the
+    # end of this file, on a source whose cameras actually disagree.
+    options: dict[str, object] = dict(
+        segment_gops=1, stats_every=50, keep_segments=True, harmonise=False
+    )
     options.update(overrides)
     frames = options.pop("frames", FRAMES)
     spec_kwargs = {key: options.pop(key) for key in ("deterministic", "master") if key in options}
@@ -770,3 +776,100 @@ def test_auto_without_a_gpu_runs_on_the_cpu_with_a_note_not_a_warning(
     assert summary.device == "cpu" and summary.warnings == () and summary.problems == ()
     assert any(line.startswith("warp on the CPU: no CUDA device") for line in said)
     assert not any(line.startswith("WARNING") for line in said)
+
+
+# --- P9: harmonisation and the two-tier gate ------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def foggy_source(tmp_path_factory: pytest.TempPathFactory) -> source.SourceSet:
+    """The analytic panorama, but the odd cameras render 4 levels brighter -- what per-view
+    fog or exposure does. Small enough to sit in the warning tier, not the fatal one."""
+    root = tmp_path_factory.mktemp("foggy")
+    rig = twenty_file_rig()
+    panorama = analytic_panorama(WIDTH, HEIGHT)
+
+    def tile_for(camera: int, _frame: int) -> np.ndarray:
+        tile = sample_panorama_into_tile(panorama, rig, camera, TILE).astype(np.int16)
+        return np.clip(tile + (4 if camera % 2 else 0), 0, 255).astype(np.uint8)
+
+    make_source_tree(
+        root, cameras=20, stem="F", frames=FRAMES[:60], size=(TILE, TILE), tile_for=tile_for
+    )
+    return source.scan(root)[0]
+
+
+def test_the_default_harmonises(moving_source: source.SourceSet, tmp_path: pathlib.Path) -> None:
+    """User, 2026-09-10: the defaults must render the data sources we have."""
+    job = SequenceJob(
+        source=moving_source,
+        rig=rig_for(moving_source.camera_count),
+        spec=EncodeSpec(WIDTH, HEIGHT, "h264", 2000, 30),
+        frames=FRAMES[:2],
+        output=tmp_path / "out.mp4",
+    )
+    assert job.harmonise is True and job.gate == "on"
+    with pytest.raises(ValueError, match="gate must be one of"):
+        dataclasses.replace(job, gate="maybe")
+
+
+@needs_ffmpeg
+def test_disagreeing_cameras_warn_uncorrected_and_pass_corrected(
+    foggy_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The two tiers and the fix, on one source: uncorrected, a 4-level camera offset lands
+    in the warning tier (the run continues, with a warning); harmonised (the default), the
+    same frames pass, and the run says so."""
+    frames = FRAMES[:60]
+    said: list[str] = []
+    off = pipeline.run_sequence(
+        _job(foggy_source, tmp_path / "off.mp4", frames=frames, harmonise=False),
+        log=said.append,
+    )
+    assert off.harmonised is False and off.stream.frames == 60
+    assert all(not r.passed and not r.fatal for r in off.gate_reports), off.gate_reports
+    assert off.warnings and "warning tier" in off.warnings[0]
+    assert any(line.startswith("WARNING: frame") for line in said)
+
+    said.clear()
+    on = pipeline.run_sequence(
+        _job(foggy_source, tmp_path / "on.mp4", frames=frames, harmonise=True), log=said.append
+    )
+    assert on.harmonised is True and on.stream.frames == 60
+    assert all(r.passed for r in on.gate_reports), on.gate_reports
+    assert on.warnings == ()
+    assert any(line.startswith("harmonise: tiles disagreed") for line in said)
+    assert any(line.startswith("harmonise on:") for line in said)
+
+
+@needs_ffmpeg
+def test_gate_off_skips_the_statistics(
+    foggy_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    summary = pipeline.run_sequence(
+        _job(foggy_source, tmp_path / "out.mp4", frames=FRAMES[:60], gate="off")
+    )
+    assert summary.gate_reports == () and summary.warnings == ()
+    assert summary.stream.frames == 60
+
+
+@needs_ffmpeg
+def test_a_flipped_rig_is_still_fatal_with_harmonisation_on(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The correction removes smooth brightness differences; an inverted elevation is a
+    geometric error of tens of levels, which no smooth field can absorb. It must still stop."""
+    good = rig_for(moving_source.camera_count)
+    flipped = Rig("flipped", tuple(View(v.yaw, -v.elevation) for v in good.views))
+    job = SequenceJob(
+        source=moving_source,
+        rig=flipped,
+        spec=EncodeSpec(WIDTH, HEIGHT, "h264", 2000, 30),
+        frames=FRAMES[:60],
+        output=tmp_path / "wrong.mp4",
+        segment_gops=1,
+        stats_every=50,
+        harmonise=True,
+    )
+    with pytest.raises(GeometryGateFailed):
+        pipeline.run_sequence(job)

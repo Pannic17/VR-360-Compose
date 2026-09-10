@@ -57,7 +57,7 @@ F32 = npt.NDArray[np.float32]
 I32 = npt.NDArray[np.int32]
 U8 = npt.NDArray[np.uint8]
 
-__all__ = ["PLAN_FORMAT", "TileContributors", "WarpPlan", "plan_fingerprint"]
+__all__ = ["PLAN_FORMAT", "TileContributors", "WarpPlan", "plan_fingerprint", "upsample_grid"]
 
 PLAN_FORMAT = 2
 """Bump when the on-disk layout changes; stale caches are then rejected, not misread."""
@@ -67,6 +67,35 @@ DEFAULT_THREADS = 8
 16 -> 2.5 s. Inside the pipeline, where the next frame's PNG decode runs concurrently and
 contends for the GIL, 8 threads beat 4 (2.2 s vs 2.8 s with 8 decode workers; 1.99 s vs
 2.07 s with 4). The decode pool's size matters as much -- see `SequenceJob.decode_workers`."""
+
+
+def upsample_grid(grid: F32, out_index: I32, width: int, height: int) -> F32:
+    """Bilinear sample of a coarse `(gh, gw, 3)` grid at flat output pixels, as `(n, 3)`.
+
+    This is how a photometric correction (:mod:`vr_compose.harmonise`) reaches every
+    sample: the grid spans the whole panorama, cell centres at `(i + 0.5) / gh` of the
+    height, edges clamped. **Float32, one rounded operation at a time, in this order** --
+    `vr_compose.warp_gpu` transcribes it statement for statement, and the two must stay
+    byte-identical.
+    """
+    gh, gw = grid.shape[0], grid.shape[1]
+    half, one, zero = np.float32(0.5), np.float32(1.0), np.float32(0.0)
+    sy, sx = np.float32(gh / height), np.float32(gw / width)
+    y = (out_index // width).astype(np.float32)
+    x = (out_index % width).astype(np.float32)
+    fy = (y + half) * sy - half
+    fx = (x + half) * sx - half
+    y0f = np.clip(np.floor(fy), zero, np.float32(gh - 2))
+    x0f = np.clip(np.floor(fx), zero, np.float32(gw - 2))
+    ty = np.clip(fy - y0f, zero, one)[:, None]
+    tx = np.clip(fx - x0f, zero, one)[:, None]
+    y0 = y0f.astype(np.int32)
+    x0 = x0f.astype(np.int32)
+    one_tx = one - tx
+    one_ty = one - ty
+    top = grid[y0, x0] * one_tx + grid[y0, x0 + 1] * tx
+    bottom = grid[y0 + 1, x0] * one_tx + grid[y0 + 1, x0 + 1] * tx
+    return np.asarray(top * one_ty + bottom * ty, dtype=np.float32)
 
 
 def plan_fingerprint(
@@ -245,8 +274,15 @@ class WarpPlan:
         with_stats: bool = False,
         threads: int = DEFAULT_THREADS,
         bit_depth: int = 8,
+        corrections: dict[int, F32] | None = None,
     ) -> StitchResult:
         """Blend one frame's tiles. Same arithmetic as :func:`stitch_bands`.
+
+        `corrections` (camera -> coarse `(gh, gw, 3)` float32 grid, from
+        :class:`vr_compose.harmonise.Harmoniser`) is subtracted from each tile's samples
+        before they are weighted -- see :func:`upsample_grid`. `None` leaves the arithmetic
+        exactly as P1 verified it; the statistics, and so the geometry gate, see the
+        corrected samples.
 
         The output is split into `threads` horizontal bands processed concurrently. numpy
         releases the GIL for the gathers and scatters, so this is real parallelism: 8K
@@ -320,6 +356,9 @@ class WarpPlan:
                         tile.fx[start:stop],
                         tile.fy[start:stop],
                     )
+                if corrections is not None:
+                    grid = corrections[tile.camera]
+                    sampled = sampled - upsample_grid(grid, out_index, self.width, self.height)
                 colour[out_index] += sampled * w[:, None]
                 weight[out_index] += w
                 if with_stats:

@@ -103,6 +103,35 @@ __device__ __forceinline__ void accumulate(
         luma_sq_sum[o] = luma_sq_sum[o] + l * l;        // luma_sq_sum += f64(luma) ** 2
     }
 }
+
+// upsample_grid, statement for statement: bilinear sample of the (gh, gw, 3) correction grid
+// at this output pixel, subtracted from the sample before it is weighted.
+__device__ __forceinline__ void correct(
+    long long o, int width, const float* __restrict__ grid, int gh, int gw, float sy, float sx,
+    float* r, float* g, float* b)
+{
+    float y = (float)(o / width);                        // out_index // width
+    float x = (float)(o % width);                        // out_index % width
+    float fy = (y + 0.5f) * sy - 0.5f;                   // (y + half) * sy - half
+    float fx = (x + 0.5f) * sx - 0.5f;
+    float y0f = fminf(fmaxf(floorf(fy), 0.0f), (float)(gh - 2));   // np.clip(np.floor(fy), 0, gh-2)
+    float x0f = fminf(fmaxf(floorf(fx), 0.0f), (float)(gw - 2));
+    float ty = fminf(fmaxf(fy - y0f, 0.0f), 1.0f);        // np.clip(fy - y0f, 0, 1)
+    float tx = fminf(fmaxf(fx - x0f, 0.0f), 1.0f);
+    int y0 = (int)y0f, x0 = (int)x0f;
+    float one_tx = 1.0f - tx, one_ty = 1.0f - ty;
+    const float* g00 = grid + ((long long)y0 * gw + x0) * 3;
+    const float* g01 = g00 + 3;
+    const float* g10 = g00 + (long long)gw * 3;
+    const float* g11 = g10 + 3;
+    float* out[3] = {r, g, b};
+    for (int c = 0; c < 3; ++c) {
+        float top = g00[c] * one_tx + g01[c] * tx;          // grid[y0,x0]*(1-tx) + grid[y0,x0+1]*tx
+        float bottom = g10[c] * one_tx + g11[c] * tx;
+        float v = top * one_ty + bottom * ty;               // top*(1-ty) + bottom*ty
+        *out[c] = *out[c] - v;                              // sampled - upsample_grid(...)
+    }
+}
 """
 
 _NEAREST = (
@@ -112,7 +141,8 @@ extern "C" __global__ void gather_nearest(
     const unsigned char* __restrict__ src, const int* __restrict__ out_index,
     const int* __restrict__ src_index, const float* __restrict__ weight, int n,
     float* colour, float* weight_sum, int with_stats,
-    float* count, double* luma_sum, double* luma_sq_sum)
+    float* count, double* luma_sum, double* luma_sq_sum,
+    const float* __restrict__ corr, int has_corr, int width, int gh, int gw, float sy, float sx)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -123,6 +153,7 @@ extern "C" __global__ void gather_nearest(
     float r = (float)src[3 * s + 0];
     float g = (float)src[3 * s + 1];
     float b = (float)src[3 * s + 2];
+    if (has_corr) correct(o, width, corr, gh, gw, sy, sx, &r, &g, &b);
     accumulate(o, r, g, b, w, colour, weight_sum, with_stats, count, luma_sum, luma_sq_sum);
 }
 """
@@ -136,7 +167,8 @@ extern "C" __global__ void gather_bilinear(
     const int* __restrict__ src_index, const float* __restrict__ weight,
     const float* __restrict__ fx, const float* __restrict__ fy, int step, int n,
     float* colour, float* weight_sum, int with_stats,
-    float* count, double* luma_sum, double* luma_sq_sum)
+    float* count, double* luma_sum, double* luma_sq_sum,
+    const float* __restrict__ corr, int has_corr, int width, int gh, int gw, float sy, float sx)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -155,6 +187,7 @@ extern "C" __global__ void gather_bilinear(
         float bottom = bl * one_wx + br * wx;           // bottom_left*(one-wx) + bottom_right*wx
         rgb[c] = top * one_wy + bottom * wy;            // top*(one-wy) + bottom*wy
     }
+    if (has_corr) correct(o, width, corr, gh, gw, sy, sx, &rgb[0], &rgb[1], &rgb[2]);
     accumulate(o, rgb[0], rgb[1], rgb[2], w, colour, weight_sum, with_stats,
                count, luma_sum, luma_sq_sum);
 }
@@ -169,7 +202,8 @@ extern "C" __global__ void gather_cubic(
     const int* __restrict__ src_index, const float* __restrict__ weight,
     const float* __restrict__ wx4, const float* __restrict__ wy4, int step, int n,
     float* colour, float* weight_sum, int with_stats,
-    float* count, double* luma_sum, double* luma_sq_sum)
+    float* count, double* luma_sum, double* luma_sq_sum,
+    const float* __restrict__ corr, int has_corr, int width, int gh, int gw, float sy, float sx)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -193,6 +227,7 @@ extern "C" __global__ void gather_cubic(
         // collapsed[0]*wy[0] + collapsed[1]*wy[1] + collapsed[2]*wy[2] + collapsed[3]*wy[3]
         rgb[c] = collapsed[0] * wy0 + collapsed[1] * wy1 + collapsed[2] * wy2 + collapsed[3] * wy3;
     }
+    if (has_corr) correct(o, width, corr, gh, gw, sy, sx, &rgb[0], &rgb[1], &rgb[2]);
     accumulate(o, rgb[0], rgb[1], rgb[2], w, colour, weight_sum, with_stats,
                count, luma_sum, luma_sq_sum);
 }
@@ -301,6 +336,7 @@ class GpuWarpPlan:
         self._out8 = cp.empty(pixels * 3, cp.uint8)
         self._out16 = cp.empty(pixels * 3, cp.uint16)
         self._sources: dict[int, Any] = {}
+        self._no_corr = cp.zeros(12, cp.float32)  # a valid pointer for the has_corr=0 launches
         cp.cuda.Device().synchronize()
         self.upload_seconds = time.time() - started
 
@@ -357,8 +393,14 @@ class GpuWarpPlan:
         with_stats: bool = False,
         threads: int = 0,
         bit_depth: int = 8,
+        corrections: dict[int, npt.NDArray[np.float32]] | None = None,
     ) -> StitchResult:
-        """Blend one frame's tiles. Same result as :meth:`WarpPlan.apply`, bit for bit."""
+        """Blend one frame's tiles. Same result as :meth:`WarpPlan.apply`, bit for bit.
+
+        `corrections` are the harmonisation grids (camera -> `(gh, gw, 3)` float32); each
+        is uploaded (a few hundred KB) and applied in-kernel by `correct()`, which is
+        :func:`vr_compose.warp.upsample_grid` transcribed.
+        """
         del threads  # the GPU has its own idea of parallelism
         self.plan._validate(tiles)
         if bit_depth not in BIT_DEPTHS:
@@ -374,13 +416,44 @@ class GpuWarpPlan:
             self._luma_sq_sum.fill(0)
         step = np.int32(self.plan.tile_size)
         flag = np.int32(1 if with_stats else 0)
-        tail = (self._colour, self._weight, flag, self._count, self._luma_sum, self._luma_sq_sum)
+        stats_args = (
+            self._colour,
+            self._weight,
+            flag,
+            self._count,
+            self._luma_sum,
+            self._luma_sq_sum,
+        )
+        width = np.int32(self.plan.width)
+        if corrections is not None:
+            first = next(iter(corrections.values()))
+            gh, gw = int(first.shape[0]), int(first.shape[1])
+            sy = np.float32(gh / self.plan.height)
+            sx = np.float32(gw / self.plan.width)
+            corr_shape = (np.int32(1), width, np.int32(gh), np.int32(gw), sy, sx)
+        else:
+            corr_shape = (
+                np.int32(0),
+                width,
+                np.int32(2),
+                np.int32(2),
+                np.float32(0),
+                np.float32(0),
+            )
         for entry in self._tiles:
             if entry.n == 0:
                 continue
             grid = ((entry.n + BLOCK - 1) // BLOCK,)
             head = (self._sources[entry.camera], entry.out_index, entry.src_index, entry.weight)
             n = np.int32(entry.n)
+            if corrections is not None:
+                block = np.ascontiguousarray(corrections[entry.camera], dtype=np.float32)
+                if block.shape != (gh, gw, 3):
+                    raise ValueError(f"camera {entry.camera}: correction grid {block.shape}")
+                corr = cp.asarray(block)
+            else:
+                corr = self._no_corr
+            tail = (*stats_args, corr, *corr_shape)
             if self.plan.sampler == "nearest":
                 self._gather(grid, (BLOCK,), (*head, n, *tail))
             elif self.plan.sampler == "bilinear":

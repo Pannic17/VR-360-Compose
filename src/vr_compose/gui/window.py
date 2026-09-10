@@ -35,6 +35,7 @@ from PySide6.QtGui import QIcon, QTextCursor
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QLabel,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
 from vr_compose import __version__, encode, pipeline
 from vr_compose import source as source_mod
 from vr_compose.device import GUI_DEVICE
+from vr_compose.harmonise import DEFAULT_HARMONISE
 from vr_compose.rig import UnknownRigError, rig_for
 from vr_compose.stitch import BIT_DEPTHS, DEFAULT_SAMPLER, SAMPLERS
 
@@ -156,6 +158,7 @@ class ComposeWindow(QMainWindow):
         self.bitrate_combo: QComboBox = self._child(QComboBox, "bitrateComboBox")
         self.fps_combo: QComboBox = self._child(QComboBox, "fpsComboBox")
         self.sampler_combo: QComboBox = self._child(QComboBox, "samplerComboBox")
+        self.harmonise_check: QCheckBox = self._child(QCheckBox, "harmoniseCheckBox")
         self.bit_depth_combo: QComboBox = self._child(QComboBox, "bitDepthComboBox")
         self.progress_bar: QProgressBar = self._child(QProgressBar, "progressBar")
         self.progress_detail: QLabel = self._child(QLabel, "progressDetailLabel")
@@ -191,6 +194,7 @@ class ComposeWindow(QMainWindow):
         self.fps_combo.addItems(["30", "60"])
         self.sampler_combo.addItems(list(SAMPLERS))
         self.sampler_combo.setCurrentText(DEFAULT_SAMPLER)
+        self.harmonise_check.setChecked(DEFAULT_HARMONISE)
         self.bit_depth_combo.addItems([str(depth) for depth in BIT_DEPTHS])
         self._mode_changed()
 
@@ -356,6 +360,8 @@ class ComposeWindow(QMainWindow):
             "--progress-json",
             "--cancel-on-stdin",
         ]
+        if not self.harmonise_check.isChecked():
+            argv.append("--no-harmonise")  # the default is the library's; only say "no"
         if video:
             argv += [
                 "--size",

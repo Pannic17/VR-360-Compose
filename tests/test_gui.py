@@ -594,3 +594,26 @@ def test_the_window_carries_the_application_icon(qt_app: QApplication) -> None:
         assert window.findChild(QLabel, "rigBadgeLabel") is None, "the rig badge was removed"
     finally:
         window.close()
+
+
+def test_harmonise_is_on_by_default_and_only_the_no_is_sent(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    """P9: the checkbox mirrors the library default (on); the argv carries only a deviation
+    from it, so the CLI's default stays the single source of truth."""
+    from vr_compose.harmonise import DEFAULT_HARMONISE
+
+    _source(tmp_path / "src")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "src"))
+        window.discover()
+        window.frames_edit.setText("1-3")
+        assert window.harmonise_check.isChecked() is DEFAULT_HARMONISE
+        argv = window.build_command()
+        assert argv is not None and "--no-harmonise" not in argv and "--harmonise" not in argv
+        window.harmonise_check.setChecked(False)
+        argv = window.build_command()
+        assert argv is not None and "--no-harmonise" in argv
+    finally:
+        window.close()

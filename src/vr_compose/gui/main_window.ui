@@ -233,6 +233,13 @@
           <item row="2" column="5">
            <widget class="QComboBox" name="bitDepthComboBox"/>
           </item>
+          <item row="3" column="0" colspan="6">
+           <widget class="QCheckBox" name="harmoniseCheckBox">
+            <property name="text"><string>光度校正：抹平各相机之间雾、曝光、运动模糊造成的亮度差（只动低频，不动细节）</string></property>
+            <property name="toolTip"><string>渲染器按每个视口单独计算体积雾、曝光、运动模糊，相邻相机看同一方向会差几级亮度，拼出来有 tile 形状的色块。开着时把这种平滑的差异在混合前扣掉；本来一致的数据几乎不受影响。关掉则输出与 P1 基准逐字节相同。</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>
