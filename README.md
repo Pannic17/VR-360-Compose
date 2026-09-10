@@ -157,6 +157,8 @@ vr-compose --source E:/22 sequence --frames 1656-2433 --size 8k --codec h264 --b
 | `--segment-gops` | `5` | 每个可续跑分段含几个 GOP（5 × 2 s = 10 s） |
 | `--stats-every` | `100` | 每多少帧做一次几何自检 |
 | `--device` | `cpu` | warp 在哪跑。`cuda` 用 NVIDIA 显卡，输出与 CPU **逐字节一致**，8K catmullrom 从 11 s/帧到 40 ms；需要 `pip install -e .[gpu]`。没有卡、没装 cupy、或显存低于 12 GB 时打 Warning 回退 `cpu`，作业照常跑。`auto` 有合格的卡就用、没有就**静默**走 CPU（只在日志里说明原因）；**GUI 固定发 `auto`，没有开关** |
+| `--harmonise` / `--no-harmonise` | 开 | **光度校正**（P9）：把相邻相机之间雾、曝光、运动模糊造成的**平滑**亮度差在混合前扣掉，只动低频、不动细节。渲染器按视口算这些效果时相邻 tile 会差几级，拼出来有 tile 形状的色块，门也过不了；开着就都解决了。本来一致的数据几乎不动（E:\22 单像素最多 2 级）。关掉则与 P1 基准逐字节相同 |
+| `--gate` | `on` | 几何自检：`on` 每 `--stats-every` 帧抽一帧算重叠一致性，超过 median 1.0 / mean 1.5 **警告**、超过 2.5 / 4.0 **停**（只有 rig 装错才到得了）；`off` 不算 |
 | `--decode-workers` | 按设备 | 解码线程。不设时 CPU 取 4（**多于 4 会拖慢 warp**，GIL 争用），GPU 取 8（那里解码才是瓶颈，4→8 让等待从 0.24 s 降到 0.13 s） |
 | `--warp-threads` | `8` | 重投影线程 |
 | `--encoder-threads` | 不设 | 给编码器的线程上限，用来压它的内存：不设时整机峰值约 24 GiB、最快；给 16 降到约 10 GiB，吞吐掉 4%。只是脚印旋钮，**不影响可复现性** |
