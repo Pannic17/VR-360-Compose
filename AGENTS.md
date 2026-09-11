@@ -1563,8 +1563,13 @@ GPL 许可问题用户明确决定不处理（非商业软件）；
    CLI 默认 cpu，GUI 固定 auto；`cuda` 无卡或显存小于 12 GB 时 Warning 回退 CPU，`auto` 静默回退；
    与 CPU 逐字节一致，指标 D 不用改容差。
    发布 exe **默认不带** cupy（spec 显式 exclude）。要带就 `tools/build_exe.py --gpu`：
-   包体 542 MiB → 1219 MiB，目标机器只要 NVIDIA 驱动和一张 12 GB 的卡，不用装 CUDA、不用装 Python。
-   2026-09-10 在无 CUDA 环境下实测冻结 exe 走 GPU，输出与 CPU 逐字节一致；细节见 spec 的「The GPU build」。
+   包体 542 MiB → 1349 MiB，目标机器只要 NVIDIA 驱动和一张 12 GB 的卡，不用装 CUDA、不用装 Python。
+   2026-09-10 在无 CUDA 环境下实测冻结 exe 走 GPU，输出与 CPU 逐字节一致；细节见 spec 的「The GPU builds」。
+   **卡的支持范围由 NVRTC 版本单独决定**（2026-09-11）：cupy 按 `min(卡, NVRTC 上限)` 编译、只出 SASS，
+   上限写死为 12.0–12.7→sm_90、12.8→sm_120、12.9+→sm_121。50 系是算力 120，所以 `--gpu` 把
+   `nvidia-cuda-nvrtc-cu12>=12.8` 打进包（本机 toolkit 仍是 12.4，NVRTC 单独来自 wheel）；
+   `--gpu system` 则要求目标机器 toolkit 12.8+。门禁多了一关 `_too_new_for_nvrtc`，卡比编译器新就
+   按规则 2/4 回退并说明，不再等到渲染时才炸。12.9 下逐字节一致复测通过，未重基线。
 3. **6 相机 rig**：用户要同一程序兼容 20 路与 6 路。**记下，先不做**（2026-09-09）。需要用户提供
    6 路样本与同帧参考全景（或 UE 相机设置）才能反解登记；细节见 ROADMAP「未来可做 — 6 相机 rig」。
 4. **各相机帧数不一致时怎么办**：另一台机器上 `D:\CR\0909C` 的 `C_AbyssalGrottos_v004` 被拒

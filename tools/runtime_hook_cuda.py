@@ -14,6 +14,14 @@ toolkit's headers), and three separate lookups have to find them:
   running `sys.executable -m cuda.pathfinder...`, and in a frozen application
   `sys.executable` is this program: it reads the module path as a subcommand, argparse
   rejects it, and the render dies with `ChildProcessError` (measured 2026-09-10).
+* NVRTC then has to find **its own** `nvrtc-builtins64_<version>.dll`, and it does that
+  through the classic library search, which reads `PATH` and does *not* read the list
+  `os.add_dll_directory` maintains. So `bin/` goes on `PATH` as well -- belt and braces
+  that turn out to be two different straps. Measured 2026-09-11, and the version matters:
+  the toolkit's 12.4 NVRTC found its builtins beside itself with no help, the 12.9 wheel
+  does not, and the whole render fails with `nvrtc: error: failed to open
+  nvrtc-builtins64_129.dll` -- which the callers turn into a CPU fallback, so the only
+  symptom is a slow render.
 
 **`CUDA_PATH` is set, not defaulted.** A machine with its own toolkit would otherwise
 send NVRTC to *those* headers, which may be a different CUDA version than the libraries
@@ -37,4 +45,5 @@ if _bundle and sys.platform == "win32":
         if os.path.isdir(_libraries):
             os.add_dll_directory(_libraries)
             os.environ["CUDA_PATH"] = _root
+            os.environ["PATH"] = _libraries + os.pathsep + os.environ.get("PATH", "")
             break

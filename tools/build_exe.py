@@ -285,8 +285,9 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="build a GPU-capable executable. 'bundled' (the default when the flag is "
         "given bare) carries cupy and the CUDA libraries, so the target machine needs "
-        "only an NVIDIA driver (+677 MB, folder shape only). 'system' carries cupy alone "
-        "and uses the CUDA Toolkit 12.x on the target machine (+145 MB, either shape). "
+        "only an NVIDIA driver, 50-series cards included (+807 MB, folder shape only). "
+        "'system' carries cupy alone and uses the CUDA Toolkit on the target machine, "
+        "which must be 12.x and 12.8+ for a 50-series card (+145 MB, either shape). "
         "See the spec's 'The GPU builds'",
     )
     parser.add_argument(
@@ -309,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--gpu bundled and --onefile do not go together. The single-file build "
             "unpacks its whole archive on every launch, and carrying the CUDA libraries "
-            "adds 558 MB to what gets unpacked -- libraries the folder build pays for "
+            "adds 603 MB to what gets unpacked -- libraries the folder build pays for "
             "once, when it is copied. Use --gpu system for a single file: it expects a "
             "CUDA Toolkit 12.x on the target machine instead of carrying one."
         )

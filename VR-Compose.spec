@@ -49,8 +49,8 @@ configure that turns a cupy-less build into a GPU one. It has to be built in.
 | `bundled` | cupy + the three CUDA libraries + the toolkit headers | an NVIDIA driver, nothing else | folder |
 | `system` | cupy | **CUDA Toolkit 12.x installed**, plus the driver | folder or single file |
 
-`system` is 558 MB smaller, which is what makes a single-file GPU build tolerable at all:
-the bootloader unpacks the whole archive on every launch, so 558 MB of libraries that the
+`system` is 603 MB smaller, which is what makes a single-file GPU build tolerable at all:
+the bootloader unpacks the whole archive on every launch, so 603 MB of libraries that the
 target already has on disk would be paid for again at every start. `bundled` asks nothing
 of the target machine and is the one to hand to someone whose setup you do not control.
 
@@ -58,15 +58,25 @@ Neither one changes the fallback: a machine that cannot serve the GPU gets the C
 warning for `--device cuda` and silently for the `auto` the GUI sends (`device`, rule 4).
 So a `system` build handed to a machine with no toolkit is not broken, just slower.
 
+**Which cards work comes down to the NVRTC version, and the two shapes answer to different
+ones.** cupy compiles for `min(device, NVRTC ceiling)` and emits SASS, never PTX, so there
+is no driver JIT to save a mismatch. The ceiling is hard-coded per version: 12.0-12.7 cap
+at sm_90, 12.8 at sm_120, 12.9 and later at sm_121. A Blackwell card (compute capability
+12.0 -- the 50-series) therefore needs **NVRTC 12.8 or newer** or it gets a Hopper cubin
+that will not load. A `bundled` build carries its own, pinned `>= 12.8` by the `gpu` extra,
+so it is settled at build time. A `system` build uses the target machine's, so the target
+needs **CUDA Toolkit 12.8+** for a 50-series card (12.0+ remains fine for Ampere, Ada and
+Hopper). `device._why_not` checks this rather than letting it be discovered at render time.
+
 **What a `bundled` build has to carry, measured rather than assumed** (2026-09-10,
 tracing the loaded modules of `import cupy` -> `cp.zeros` -> `RawKernel` on a 4090).
 A `system` build carries only the cupy row; the rest comes from the target's toolkit:
 
 | | | |
 |---|---|---|
-| `cublasLt64_12.dll` | 473 MB | loaded eagerly by `import cupy` |
-| `nvrtc64_120_0.dll` | 45 MB | same -- kernels are compiled at runtime |
-| `nvrtc-builtins64_124.dll` | 6 MB | on the first `RawKernel` compile |
+| `cublasLt64_12.dll` | 473 MB | loaded eagerly by `import cupy`; from `CUDA_PATH` |
+| `nvrtc64_120_0.dll` | 90 MB | kernels are compiled at runtime; **from the pip wheel** |
+| `nvrtc-builtins64_129.dll` | 7 MB | on the first `RawKernel` compile; same wheel |
 | the cupy package | 158 MB | including 22 MB of headers NVRTC reads |
 | the toolkit's `include/` | 35 MB | NVRTC reads those too, at every launch |
 
@@ -103,6 +113,7 @@ the size by nothing at all: PyInstaller's PySide6 hook already ships only what i
 imported. The work has been done once and is not worth repeating.
 """
 
+import importlib.util
 import os
 import pathlib
 
@@ -117,8 +128,11 @@ GPU = os.environ.get("VRC_GPU") or ""
 if GPU not in ("", "bundled", "system"):
     raise SystemExit(f"VRC_GPU must be 'bundled' or 'system', got {GPU!r}")
 
-CUDA_LIBRARIES = ("cublasLt64_12.dll", "nvrtc64_120_0.dll", "nvrtc-builtins64_124.dll")
-"""The three the warp actually loads, and they go in `bin/`. The docstring says why."""
+CUDA_LIBRARY = "cublasLt64_12.dll"
+"""Loaded eagerly by `import cupy`, and taken from the toolkit `CUDA_PATH` points at."""
+
+NVRTC_PACKAGE = "nvidia.cuda_nvrtc"
+"""Where NVRTC comes from instead, and the docstring says why it is not the toolkit's."""
 
 CUDA_COLLECTED = (
     "cublas64_12.dll",
@@ -180,11 +194,35 @@ if GPU:
     datas += collect_data_files("cupy")
 if GPU == "bundled":
     cuda_root = pathlib.Path(os.environ.get("CUDA_PATH", ""))
-    for name in CUDA_LIBRARIES:
-        library = cuda_root / "bin" / name
-        if not library.is_file():
-            raise SystemExit(f"VRC_GPU=bundled needs {name}; CUDA_PATH is {os.environ.get('CUDA_PATH')!r}")
-        binaries.append((str(library), "bin"))
+    library = cuda_root / "bin" / CUDA_LIBRARY
+    if not library.is_file():
+        raise SystemExit(
+            f"VRC_GPU=bundled needs {CUDA_LIBRARY}; CUDA_PATH is {os.environ.get('CUDA_PATH')!r}"
+        )
+    binaries.append((str(library), "bin"))
+    # **NVRTC comes from the pip wheel, not from CUDA_PATH, and that is what makes the
+    # build work on a 50-series card.** cupy compiles for `min(device, nvrtc ceiling)`
+    # and the ceiling is hard-coded per NVRTC version (compiler.py:193-205): 12.0-12.7
+    # cap at sm_90, 12.8 at sm_120, 12.9 and later at sm_121. It always emits SASS, never
+    # PTX, so there is nothing for the driver to JIT: a Blackwell card (compute capability
+    # 12.0) against a 12.4 NVRTC gets a Hopper cubin that cannot load, and the run falls
+    # back to the CPU -- silently, for the `auto` the GUI sends. The toolkit on the build
+    # machine is 12.4 and installing another one is a big thing to ask of a workstation,
+    # so the wheel supplies the one library whose version actually decides this.
+    nvrtc_spec = importlib.util.find_spec(NVRTC_PACKAGE)
+    if nvrtc_spec is None or not nvrtc_spec.submodule_search_locations:
+        raise SystemExit(
+            f"VRC_GPU=bundled needs {NVRTC_PACKAGE}: pip install -e '.[gpu]' (it pins >= 12.8)"
+        )
+    nvrtc_bin = pathlib.Path(list(nvrtc_spec.submodule_search_locations)[0]) / "bin"
+    # `nvrtc64_120_0.alt.dll` is a second 90 MB copy for older drivers that nothing here
+    # asks for; `nvrtc-builtins64_<version>.dll` has the NVRTC version in its name, so it
+    # is matched rather than spelled out and cannot go stale when the pin moves.
+    found = [dll for dll in sorted(nvrtc_bin.glob("nvrtc*.dll")) if ".alt." not in dll.name]
+    if len(found) != 2:
+        raise SystemExit(f"expected nvrtc and its builtins in {nvrtc_bin}, found {found}")
+    for dll in found:
+        binaries.append((str(dll), "bin"))
     # The toolkit's headers, whole. NVRTC compiles the warp's kernels at runtime and
     # reads them, and cuda-pathfinder looks under `$CUDA_PATH/include` -- failing which
     # it goes looking for a CUDA installation by running `sys.executable -m ...`, which

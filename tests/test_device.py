@@ -68,6 +68,50 @@ def test_auto_takes_the_cpu_quietly_when_the_gate_says_no(found: CudaProbe) -> N
     assert placed.note.removesuffix("; using the CPU") in warned.warning
 
 
+def test_a_card_newer_than_the_compiler_is_refused_before_the_upload() -> None:
+    """A 50-series card against a CUDA older than 12.8: the gate says so, rather than the
+    render discovering it after building and uploading a 4.6 GB plan.
+
+    cupy compiles for `min(card, ceiling)` and emits SASS, so a cubin for the wrong
+    architecture simply will not load. The numbers are cupy's own: NVRTC 12.0-12.7 stop
+    at 90, and a Blackwell card is 120.
+    """
+    found = probe_with(
+        name="NVIDIA GeForce RTX 5090",
+        total_bytes=32 * GB,
+        compute_capability="120",
+        nvrtc_ceiling="90",
+    )
+    placed = resolve_device("cuda", probe=lambda: found)
+    assert placed.device == "cpu" and placed.fell_back
+    assert placed.warning is not None
+    assert "compute capability 120" in placed.warning
+    assert "no further than 90" in placed.warning
+    assert "12.8" in placed.warning
+
+
+def test_the_same_card_passes_once_the_compiler_can_reach_it() -> None:
+    found = probe_with(
+        name="NVIDIA GeForce RTX 5090",
+        total_bytes=32 * GB,
+        compute_capability="120",
+        nvrtc_ceiling="121",
+    )
+    assert resolve_device("cuda", probe=lambda: found).device == "cuda"
+
+
+@pytest.mark.parametrize("fields", [{"nvrtc_ceiling": ""}, {"compute_capability": ""},
+                                    {"compute_capability": "sm_120"}])  # fmt: skip
+def test_an_unreadable_pair_costs_the_check_and_not_the_gpu(fields: dict[str, str]) -> None:
+    """`probe_cuda` reads both through `_read`, and cupy could rename what it reads from.
+
+    When that happens the gate must lose its opinion, not the card: the render still has
+    its own fallback if the compile turns out to fail.
+    """
+    found = probe_with(**{"compute_capability": "120", "nvrtc_ceiling": "90", **fields})
+    assert resolve_device("cuda", probe=lambda: found).device == "cuda"
+
+
 def test_missing_cupy_warns_and_falls_back() -> None:
     placed = resolve_device(
         "cuda", probe=lambda: CudaProbe(importable=False, error="ModuleNotFoundError: cupy")

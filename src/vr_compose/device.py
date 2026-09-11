@@ -53,6 +53,10 @@ class CudaProbe:
     count: int = 0
     name: str = ""
     total_bytes: int = 0
+    compute_capability: str = ""
+    """The card's, as cupy spells it: `89` for Ada, `120` for a 50-series Blackwell."""
+    nvrtc_ceiling: str = ""
+    """The highest this machine's NVRTC can compile for. Empty when it could not be read."""
 
     @property
     def describe(self) -> str:
@@ -97,7 +101,26 @@ def probe_cuda() -> CudaProbe:
         total = int(props["totalGlobalMem"])
     except Exception as error:
         return CudaProbe(importable=True, count=count, error=f"{type(error).__name__}: {error}")
-    return CudaProbe(importable=True, count=count, name=str(name), total_bytes=total)
+    return CudaProbe(
+        importable=True,
+        count=count,
+        name=str(name),
+        total_bytes=total,
+        compute_capability=_read(lambda: str(cp.cuda.Device(0).compute_capability)),
+        # Private, and read defensively on purpose: this is the very function cupy uses to
+        # pick the compile target, so asking it is the only way to be right, but a cupy
+        # that renamed it must cost us the *check*, never the GPU. `_read` returns "" and
+        # `_why_not` then skips the question rather than refusing a card over it.
+        nvrtc_ceiling=_read(lambda: str(cp.cuda.compiler._get_max_compute_capability())),
+    )
+
+
+def _read(value: Callable[[], str]) -> str:
+    """`value()`, or `""` if it raised. For facts the gate can do without."""
+    try:
+        return value()
+    except Exception:
+        return ""
 
 
 def resolve_device(
@@ -147,4 +170,36 @@ def _why_not(found: CudaProbe, minimum_bytes: int) -> str | None:
             f"{found.name} has {found.total_bytes / 1e9:.1f} GB of memory, below the "
             f"{minimum_bytes / 1e9:.0f} GB floor"
         )
-    return None
+    return _too_new_for_nvrtc(found)
+
+
+def _too_new_for_nvrtc(found: CudaProbe) -> str | None:
+    """A card the compiler here cannot build for at all -- found before a 4.6 GB upload.
+
+    cupy compiles for `min(card, NVRTC ceiling)` and emits SASS rather than PTX, so there
+    is no driver JIT to rescue a mismatch: a card above the ceiling gets a cubin for an
+    older architecture and `cuModuleLoadData` refuses it. The ceiling is hard-coded per
+    NVRTC version -- 12.0 to 12.7 stop at sm_90, 12.8 reaches sm_120, 12.9 and later
+    sm_121 -- so a 50-series Blackwell (compute capability 120) needs NVRTC 12.8 or newer.
+
+    Without this the failure lands at the first kernel compile instead, which the callers
+    do turn into a CPU fallback -- but silently, for the `auto` the GUI sends. Someone
+    with a new card would see a slow render and no reason for it. Here it is one line
+    that names the card, the ceiling and the fix.
+
+    Both facts are read defensively (see `_read`), and an unreadable one means no opinion:
+    the render will still fall back safely if it turns out badly.
+    """
+    if not found.compute_capability or not found.nvrtc_ceiling:
+        return None
+    try:
+        too_new = int(found.compute_capability) > int(found.nvrtc_ceiling)
+    except ValueError:
+        return None
+    if not too_new:
+        return None
+    return (
+        f"{found.name} is compute capability {found.compute_capability} and the CUDA "
+        f"toolkit here compiles no further than {found.nvrtc_ceiling} "
+        "(a 50-series card needs CUDA 12.8 or newer)"
+    )

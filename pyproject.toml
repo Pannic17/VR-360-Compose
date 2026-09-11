@@ -23,6 +23,13 @@ dependencies = [
 # The pip wheel finds the CUDA runtime on its own (cuda-pathfinder); tested with 14.2.
 gpu = [
     "cupy-cuda12x>=13.4",
+    # NVRTC decides which cards work at all, so it is pinned rather than taken from
+    # whatever toolkit the machine happens to have. cupy compiles for
+    # `min(card, NVRTC ceiling)` and emits SASS, never PTX, and the ceiling is hard-coded
+    # per version: 12.0-12.7 stop at sm_90, 12.8 reaches sm_120, 12.9 and later sm_121.
+    # A 50-series Blackwell card is compute capability 120, so anything below 12.8 builds
+    # it a cubin that will not load. 90 MB, and it is what `--gpu` puts in the bundle.
+    "nvidia-cuda-nvrtc-cu12>=12.8",
 ]
 dev = [
     "pyinstaller>=6.10",   # 打包 exe（P8）

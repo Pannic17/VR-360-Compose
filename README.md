@@ -280,10 +280,16 @@ catmullrom 在它上面比 bilinear 差，却对源还原好 1.24 dB。细节见
 
 | 命令 | 包体 | 目标机器要有 |
 |---|---|---|
-| `build_exe.py --gpu` | 文件夹 542 MiB → **1219 MiB** | NVIDIA 驱动，别的都不用 |
-| `build_exe.py --gpu system` | 文件夹 +145 MB；单文件 213 → **311 MiB** | **CUDA Toolkit 12.x** 加驱动 |
+| `build_exe.py --gpu` | 文件夹 542 MiB → **1349 MiB** | NVIDIA 驱动，别的都不用（含 50 系） |
+| `build_exe.py --gpu system` | 文件夹 +145 MB；单文件 213 → **311 MiB** | **CUDA Toolkit 12.x** 加驱动；50 系要 **12.8+** |
 
 `--gpu`（即 `--gpu bundled`）把 CUDA 库一起带走，只支持文件夹形态。`--gpu system` 只带 cupy、用目标机器自己的 toolkit，因此单文件也能带 GPU——代价是单文件每次启动都要解压整个包体，实测 **21–28 s** 才出命令行、约 18 s 才出窗口（文件夹版 0.78 s）。两种都一样：机器伺候不了就回退 CPU，`--device cuda` 打 Warning、GUI 的 `auto` 静默回退，作业照常跑。
+
+**50 系显卡（Blackwell，算力 120）看 NVRTC 版本**：cupy 按 `min(卡, NVRTC 上限)` 编译且只出 SASS 不出 PTX，
+上限按版本写死——12.0–12.7 到 sm_90，12.8 到 sm_120，12.9 起 sm_121。所以 50 系需要 **NVRTC 12.8 以上**，
+否则拿到的 cubin 加载不了。`--gpu` 自带一个钉在 `>=12.8` 的（`[gpu]` extra 里的 `nvidia-cuda-nvrtc-cu12`），
+打包时就定了；`--gpu system` 用目标机器的，所以目标机器的 toolkit 得是 12.8+。
+两种情况门禁都会先查一遍（`device._why_not`），卡太新就直接说明原因，而不是等渲染时才发现。
 
 ## 常见问题
 
