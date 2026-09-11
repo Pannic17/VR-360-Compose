@@ -228,10 +228,25 @@ def cmd_frame(args: argparse.Namespace) -> int:
             sampler=args.sampler, feather_power=args.feather_power,
         )  # fmt: skip
         grids = corrections.grids if corrections is not None else None
+        gpu = None
         if placement.device == "cuda":
             from vr_compose import warp_gpu
 
-            gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
+            # `pipeline._place_plan` has caught this since the GPU path was written and
+            # this did not, which made `frame` the one command where a GPU failure is a
+            # traceback instead of the warning the rule asks for (`device`, rule 2). Not
+            # hypothetical: a card newer than the machine's CUDA toolkit knows about --
+            # a Blackwell with anything below 12.8 -- passes the gate and then fails here,
+            # at the first kernel compile, which is the first thing `from_plan` does.
+            try:
+                gpu = warp_gpu.GpuWarpPlan.from_plan(plan)
+            except Exception as error:
+                print(
+                    f"WARNING    : the warp plan could not be placed on {placement.detail}; "
+                    f"falling back to the CPU. [{type(error).__name__}: {error}]"
+                )
+                placement = device_mod.Placement("cpu")
+        if gpu is not None:
             print(
                 f"warp       : cuda ({placement.detail}), plan built in "
                 f"{plan.build_seconds:.1f} s, resident in {gpu.upload_seconds:.1f} s"
