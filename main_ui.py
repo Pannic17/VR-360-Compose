@@ -278,9 +278,38 @@ def wants_cli(argv: list[str]) -> bool:
     return bool(argv)
 
 
+def _keep_the_kernel_cache_in_memory() -> None:
+    """A single-file build cannot use cupy's on-disk kernel cache, so stop it writing one.
+
+    cupy hashes the NVRTC options into the cache key, and four of those options are
+    absolute `-I` paths into its own package -- which in a single-file build is the
+    temporary directory the bootloader unpacks into, under a **new random name on every
+    launch** (measured: `_MEI000085bc2`, `_MEI000117c42`, `_MEI0000fee42`). So the key is
+    new every time, the cache never hits, and every run leaves a fresh cubin in
+    `~/.cupy/kernel_cache` that nothing will ever read again -- tens of KB per render,
+    for ever.
+
+    `CUPY_CACHE_IN_MEMORY=1` costs nothing here: the compile (measured 0.35 s cold, 0.20 s
+    warm, for the one sampler kernel and the finish module a render actually builds) was
+    being paid on every launch anyway. Only the orphan files stop.
+
+    **The folder build is not affected and must not be touched**: there `_MEIPASS` is the
+    fixed `_internal` directory, the key is stable, and the cache does its job. The two
+    shapes are told apart the standard way -- in a folder build `_MEIPASS` is where the
+    executable lives, and in a single-file build it is somewhere in `%TEMP%`.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle is None:
+        return
+    beside = pathlib.Path(sys.executable).resolve().parent
+    if pathlib.Path(bundle).resolve() != beside:
+        os.environ.setdefault("CUPY_CACHE_IN_MEMORY", "1")
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     _make_package_importable()
+    _keep_the_kernel_cache_in_memory()
     if wants_cli(arguments):
         _attach_parent_console()
         from vr_compose.cli import main as run_cli
