@@ -276,6 +276,15 @@ catmullrom 在它上面比 bilinear 差，却对源还原好 1.24 dB。细节见
 
 **GPU 加速**：`pip install -e .[gpu]` 后加 `--device cuda`，8K catmullrom 的 warp 从 11 s 到 40 ms，100 帧实跑 0.48 s/帧（瓶颈换成 PNG 解码与 x264）。输出与 CPU **逐字节一致**。没有 NVIDIA 卡、或显存低于 12 GB 时打 Warning 回退 CPU，作业照常跑。GUI 固定用 `auto`：有合格的卡就用，没有就静默走 CPU，没有开关。见 AGENTS.md 第 8 节。
 
+打包的 exe **默认不带** cupy，所以它在任何机器上都只走 CPU——冻结的程序只认自己包里的东西，目标机器自己装的 cupy 它看不见，`PYTHONPATH` 也没用（实测）。要让 exe 也能用 GPU，打包时选一种带法：
+
+| 命令 | 包体 | 目标机器要有 |
+|---|---|---|
+| `build_exe.py --gpu` | 文件夹 542 MiB → **1219 MiB** | NVIDIA 驱动，别的都不用 |
+| `build_exe.py --gpu system` | 文件夹 +145 MB；单文件 213 → **311 MiB** | **CUDA Toolkit 12.x** 加驱动 |
+
+`--gpu`（即 `--gpu bundled`）把 CUDA 库一起带走，只支持文件夹形态。`--gpu system` 只带 cupy、用目标机器自己的 toolkit，因此单文件也能带 GPU——代价是单文件每次启动都要解压整个包体，实测 **21–28 s** 才出命令行、约 18 s 才出窗口（文件夹版 0.78 s）。两种都一样：机器伺候不了就回退 CPU，`--device cuda` 打 Warning、GUI 的 `auto` 静默回退，作业照常跑。
+
 ## 常见问题
 
 **`--frames` 别省成 `all`。** 参考数据里有一张孤零零的 `0000` 帧，`all` 会把它算进去，视频开头会跳帧。

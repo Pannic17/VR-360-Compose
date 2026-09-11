@@ -8,6 +8,9 @@ sets. Run bare, it produces the onedir build -- the safe default:
 * `VRC_FFMPEG_DIR=<dir>` -- put that directory's ffmpeg.exe and ffprobe.exe *inside* the
   bundle. Only meaningful with `VRC_ONEFILE`: without it the folder build gets them
   copied in beside the executable, which is cheaper and does the same job.
+* `VRC_GPU=1` -- put cupy and the CUDA libraries into the bundle, so `--device cuda`
+  works on a machine that has an NVIDIA driver and nothing else installed. Costs about
+  680 MB; see "The GPU build" below. Folder shape only.
 
 One spec with one branch rather than two spec files, because the two shapes differ in
 three lines and the failure mode of two files is that they drift.
@@ -30,6 +33,71 @@ The onefile cost is structural, not a tuning problem: its bootloader unpacks the
 archive on every launch, and ffmpeg is 370 MiB of that archive. There is no way to
 unpack it once and keep it -- extraction happens before any of this project's code runs.
 
+## The GPU builds (`VRC_GPU`, added 2026-09-10)
+
+Without it the bundle has no cupy and `--device cuda` can never be served: **a frozen
+build imports only what is inside it**. cupy installed on the target machine is
+invisible, and so is `PYTHONPATH` -- measured 2026-09-11, pointing it straight at a
+site-packages holding cupy, on a machine with the toolkit and a 4090: the exe still said
+`ModuleNotFoundError: No module named 'cupy'`. There is no environment a user can
+configure that turns a cupy-less build into a GPU one. It has to be built in.
+
+**Two ways to build it in**, and they differ only in whether the toolkit rides along:
+
+| `VRC_GPU` | carries | the target machine needs | shapes |
+|---|---|---|---|
+| `bundled` | cupy + the three CUDA libraries + the toolkit headers | an NVIDIA driver, nothing else | folder |
+| `system` | cupy | **CUDA Toolkit 12.x installed**, plus the driver | folder or single file |
+
+`system` is 558 MB smaller, which is what makes a single-file GPU build tolerable at all:
+the bootloader unpacks the whole archive on every launch, so 558 MB of libraries that the
+target already has on disk would be paid for again at every start. `bundled` asks nothing
+of the target machine and is the one to hand to someone whose setup you do not control.
+
+Neither one changes the fallback: a machine that cannot serve the GPU gets the CPU, with a
+warning for `--device cuda` and silently for the `auto` the GUI sends (`device`, rule 4).
+So a `system` build handed to a machine with no toolkit is not broken, just slower.
+
+**What a `bundled` build has to carry, measured rather than assumed** (2026-09-10,
+tracing the loaded modules of `import cupy` -> `cp.zeros` -> `RawKernel` on a 4090).
+A `system` build carries only the cupy row; the rest comes from the target's toolkit:
+
+| | | |
+|---|---|---|
+| `cublasLt64_12.dll` | 473 MB | loaded eagerly by `import cupy` |
+| `nvrtc64_120_0.dll` | 45 MB | same -- kernels are compiled at runtime |
+| `nvrtc-builtins64_124.dll` | 6 MB | on the first `RawKernel` compile |
+| the cupy package | 158 MB | including 22 MB of headers NVRTC reads |
+| the toolkit's `include/` | 35 MB | NVRTC reads those too, at every launch |
+
+A first build carried 2525 MiB, because PyInstaller's dependency analysis imports what it
+collects and follows every library those imports touch. What it collects that way is
+dropped again below `Analysis`; see the comment there.
+
+**Nothing else.** cublas, cufft, cusparse, cusolver, curand and nvJitLink are 1.4 GB
+between them and not one of them is loaded -- the note that used to be here guessed
+"~1 GB of CUDA libraries" and was both too high and about the wrong libraries.
+`nvcuda.dll` is the *driver's*, lives in System32, and must never be copied: it belongs
+to whatever card the machine has.
+
+**A `bundled` bundle is a CUDA toolkit, as far as cupy is concerned**: `bin/` holds the
+three libraries, `include/` holds the headers, and `tools/runtime_hook_cuda.py` points
+`CUDA_PATH` at it. That is not decoration, it is the layout every lookup expects. A
+`system` build ships none of that and sets nothing, so every one of those lookups lands
+on the target's own `CUDA_PATH` -- which its toolkit installer set system-wide.
+
+**The libraries go in `bin/`, and the bundle root must have none of them.** cupy works
+out where the CUDA toolkit is by asking cuda-pathfinder for nvrtc and taking the
+grandparent directory of the answer, then adds `<that>/bin` to the DLL search path
+without checking it exists. A `bin/` subdirectory is therefore not decoration: it is the
+layout that makes the arithmetic come out at the bundle. `tools/runtime_hook_cuda.py`
+puts that directory on the DLL search path before anything imports cupy, which is how
+pathfinder finds it in the first place -- PyInstaller only searches the bundle root.
+
+**`bundled` is folder-shape only.** A onefile build already unpacks 494 MiB on every
+launch; adding 680 MB to that is not a build anyone would wait for. `system` adds about
+145 MB and is allowed in either shape.
+
 **No Qt exclude list**, in either shape. Adding 47 `--exclude-module` entries changed
 the size by nothing at all: PyInstaller's PySide6 hook already ships only what is
 imported. The work has been done once and is not worth repeating.
@@ -38,11 +106,31 @@ imported. The work has been done once and is not worth repeating.
 import os
 import pathlib
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 ROOT = pathlib.Path(SPECPATH)
 GUI = ROOT / "src" / "vr_compose" / "gui"
 
 ONEFILE = os.environ.get("VRC_ONEFILE") == "1"
 FFMPEG_DIR = os.environ.get("VRC_FFMPEG_DIR") or None
+GPU = os.environ.get("VRC_GPU") or ""
+if GPU not in ("", "bundled", "system"):
+    raise SystemExit(f"VRC_GPU must be 'bundled' or 'system', got {GPU!r}")
+
+CUDA_LIBRARIES = ("cublasLt64_12.dll", "nvrtc64_120_0.dll", "nvrtc-builtins64_124.dll")
+"""The three the warp actually loads, and they go in `bin/`. The docstring says why."""
+
+CUDA_COLLECTED = (
+    "cublas64_12.dll",
+    "cublaslt64_12.dll",
+    "cufft64_11.dll",
+    "curand64_10.dll",
+    "cusolver64_11.dll",
+    "cusparse64_12.dll",
+    "nvjitlink_120_0.dll",
+    "nvrtc64_120_0.dll",
+)
+"""What PyInstaller puts in the bundle root by itself. All of it goes; the docstring says why."""
 
 # The window is built from these at runtime, so they are data and must be in the bundle;
 # without them the exe starts and then cannot draw anything.
@@ -63,23 +151,93 @@ if FFMPEG_DIR:
             raise SystemExit(f"VRC_FFMPEG_DIR is set but {name} is not in {FFMPEG_DIR}")
         datas.append((str(tool), "."))
 
+binaries = []
+hiddenimports = ["vr_compose.cli", "vr_compose.gui.window"]
+runtime_hooks = []
+# The GPU warp (`vr_compose.warp_gpu`) imports cupy lazily, but PyInstaller follows
+# imports inside functions too, so without this list a default build would carry the
+# whole CUDA stack for a GUI that never asks for the GPU. Excluded unless VRC_GPU says
+# otherwise (2026-09-09; the flag came 2026-09-10).
+excludes = ["cupy", "cupyx", "cupy_backends", "cuda", "fastrlock"]
+
+if GPU:
+    excludes = []
+    # cupy reaches several of its own submodules dynamically (`cupy.cuda.thrust`,
+    # `cupy.fft._callback`), which a static analysis does not see.
+    hiddenimports += collect_submodules("cupy")
+    hiddenimports += collect_submodules("cupy_backends")
+    hiddenimports += ["cupyx", "cuda.pathfinder"]
+    # `graphlib` is imported by a *compiled* module in `cupy._core`, so nothing in any
+    # source file mentions it and PyInstaller's analysis cannot see it. Without it
+    # `import cupy` raises ModuleNotFoundError, which the device gate reads as "no GPU".
+    # Found by diffing what `import cupy` loads against what the build contains; it was
+    # the only real absence, and the only other candidate (`_cython_3_2_4`) is a module
+    # Cython synthesises at import time rather than a file anyone can bundle.
+    hiddenimports += ["graphlib"]
+    # cupy's own headers: 22 MB of `.cuh` that NVRTC reads when it compiles a kernel.
+    # They are data rather than imports, so nothing collects them by itself, and without
+    # them the exe imports cupy happily and dies on the first `cp.zeros`.
+    datas += collect_data_files("cupy")
+if GPU == "bundled":
+    cuda_root = pathlib.Path(os.environ.get("CUDA_PATH", ""))
+    for name in CUDA_LIBRARIES:
+        library = cuda_root / "bin" / name
+        if not library.is_file():
+            raise SystemExit(f"VRC_GPU=bundled needs {name}; CUDA_PATH is {os.environ.get('CUDA_PATH')!r}")
+        binaries.append((str(library), "bin"))
+    # The toolkit's headers, whole. NVRTC compiles the warp's kernels at runtime and
+    # reads them, and cuda-pathfinder looks under `$CUDA_PATH/include` -- failing which
+    # it goes looking for a CUDA installation by running `sys.executable -m ...`, which
+    # in a frozen application is this executable, which reads that as command-line
+    # arguments and exits. 35 MB, against picking headers by hand and finding out at
+    # someone's first render which transitive include was missed.
+    headers = cuda_root / "include"
+    if not headers.is_dir():
+        raise SystemExit(f"VRC_GPU=bundled needs the toolkit headers at {headers}")
+    for header in headers.rglob("*"):
+        if header.is_file():
+            datas.append((str(header), str("include" / header.parent.relative_to(headers))))
+    runtime_hooks.append(str(ROOT / "tools" / "runtime_hook_cuda.py"))
+
 analysis = Analysis(
     [str(ROOT / "main_ui.py")],
     pathex=[str(ROOT / "src")],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=["vr_compose.cli", "vr_compose.gui.window"],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
-    # The GPU warp (`vr_compose.warp_gpu`) imports cupy lazily, but PyInstaller follows
-    # imports inside functions too and its cupy hook would then drag ~1 GB of CUDA
-    # libraries into a build meant for the GUI, which never asks for the GPU. Excluded on
-    # purpose (approved 2026-09-09); `--device cuda` is for running from source.
-    excludes=["cupy", "cupyx", "cupy_backends", "cuda", "fastrlock"],
+    runtime_hooks=runtime_hooks,
+    excludes=excludes,
     noarchive=False,
     optimize=0,
 )
+
+if GPU:
+    # **Everything CUDA that PyInstaller collected by itself is dropped** -- in both
+    # modes. A `bundled` build keeps the three it put in `bin/` itself; a `system` build
+    # keeps none and uses the target's. Two separate reasons, both measured on 2026-09-10:
+    #
+    # *It is 884 MB of dead weight.* Importing every cupy submodule reaches the wrappers
+    # for cuFFT, cuSPARSE, cuSOLVER, cuBLAS, cuRAND and nvJitLink, so the analysis brings
+    # their libraries too. The warp is RawKernel, RawModule, asarray, zeros and asnumpy;
+    # none of the six is ever loaded. The wrapper *modules* stay -- cupy imports them
+    # itself, and only opens a library when someone does linear algebra, which nothing here
+    # does. That is also why this is a filter and not an `excludes` entry.
+    #
+    # *The root copies break the import outright.* `cupy._environment` locates the toolkit
+    # by asking cuda-pathfinder for nvrtc and taking `dirname(dirname(...))` of the answer,
+    # then calls `os.add_dll_directory(root + "/bin")` without checking that it exists. Found
+    # at the bundle root, that computes the *application* directory, whose `bin` does not
+    # exist, and `import cupy` raises FileNotFoundError -- which the device gate reads as
+    # "no GPU" and quietly runs on the CPU. Found in `bin/`, the same arithmetic gives the
+    # bundle directory, whose `bin` is exactly where these libraries are. This is why the
+    # filter is not conditional on the mode: a `system` build with a stray nvrtc at its
+    # root would compute a root that is a *temporary unpack directory* and break the same
+    # way, while having a perfectly good toolkit on the machine to use instead.
+    analysis.binaries = [
+        entry for entry in analysis.binaries if entry[0].lower() not in CUDA_COLLECTED
+    ]
 
 archive = PYZ(analysis.pure)
 

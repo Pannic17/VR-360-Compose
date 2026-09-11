@@ -1562,7 +1562,9 @@ GPL 许可问题用户明确决定不处理（非商业软件）；
 2. ~~**GPU 加速做不做、何时做**~~ **已做**（2026-09-09，第 8 节「GPU 加速」）：`--device cuda`，
    CLI 默认 cpu，GUI 固定 auto；`cuda` 无卡或显存小于 12 GB 时 Warning 回退 CPU，`auto` 静默回退；
    与 CPU 逐字节一致，指标 D 不用改容差。
-   发布 exe **不带** cupy（PyInstaller spec 显式 exclude）——GPU 路径是源码运行的开发机用的。
+   发布 exe **默认不带** cupy（spec 显式 exclude）。要带就 `tools/build_exe.py --gpu`：
+   包体 542 MiB → 1219 MiB，目标机器只要 NVIDIA 驱动和一张 12 GB 的卡，不用装 CUDA、不用装 Python。
+   2026-09-10 在无 CUDA 环境下实测冻结 exe 走 GPU，输出与 CPU 逐字节一致；细节见 spec 的「The GPU build」。
 3. **6 相机 rig**：用户要同一程序兼容 20 路与 6 路。**记下，先不做**（2026-09-09）。需要用户提供
    6 路样本与同帧参考全景（或 UE 相机设置）才能反解登记；细节见 ROADMAP「未来可做 — 6 相机 rig」。
 4. **各相机帧数不一致时怎么办**：另一台机器上 `D:\CR\0909C` 的 `C_AbyssalGrottos_v004` 被拒

@@ -5,6 +5,8 @@ needs ends up in it here rather than in someone's memory.
 
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin              # the folder (default)
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --onefile    # one executable
+    python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --gpu        # the folder, carrying CUDA
+    python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --gpu system --onefile  # one file, needs CUDA
     python tools/build_exe.py --skip-build                        # re-stage only
     python tools/build_exe.py --smoke --source E:/22              # + check what was built
 
@@ -128,10 +130,16 @@ def ensure_not_running(exe: pathlib.Path) -> None:
         ) from None
 
 
-def build(layout: Layout, tools: list[pathlib.Path]) -> None:
+def build(layout: Layout, tools: list[pathlib.Path], gpu: str | None = None) -> None:
     """Drive PyInstaller. The spec reads the shape out of the environment; see its docstring."""
     ensure_not_running(layout.exe)
     environment = dict(os.environ)
+    # Set both ways round, always: a stale VRC_GPU in someone's shell would otherwise
+    # decide the shape of a build that never asked for it, and it is a 600 MB decision.
+    if gpu:
+        environment["VRC_GPU"] = gpu
+    else:
+        environment.pop("VRC_GPU", None)
     if layout.onefile:
         environment["VRC_ONEFILE"] = "1"
         # The pair is already located and verified, so hand the spec their directory
@@ -270,6 +278,18 @@ def main(argv: list[str] | None = None) -> int:
         help="one executable with ffmpeg inside it, instead of a folder (see the module docstring)",
     )
     parser.add_argument(
+        "--gpu",
+        nargs="?",
+        const="bundled",
+        choices=("bundled", "system"),
+        default=None,
+        help="build a GPU-capable executable. 'bundled' (the default when the flag is "
+        "given bare) carries cupy and the CUDA libraries, so the target machine needs "
+        "only an NVIDIA driver (+677 MB, folder shape only). 'system' carries cupy alone "
+        "and uses the CUDA Toolkit 12.x on the target machine (+145 MB, either shape). "
+        "See the spec's 'The GPU builds'",
+    )
+    parser.add_argument(
         "--smoke",
         action="store_true",
         help="run the checks against the built executable. Off by default (user's "
@@ -285,11 +305,20 @@ def main(argv: list[str] | None = None) -> int:
             "because a silently skipped render check looks exactly like a passing one."
         )
 
+    if args.gpu == "bundled" and args.onefile:
+        raise SystemExit(
+            "--gpu bundled and --onefile do not go together. The single-file build "
+            "unpacks its whole archive on every launch, and carrying the CUDA libraries "
+            "adds 558 MB to what gets unpacked -- libraries the folder build pays for "
+            "once, when it is copied. Use --gpu system for a single file: it expects a "
+            "CUDA Toolkit 12.x on the target machine instead of carrying one."
+        )
+
     layout = Layout(onefile=args.onefile)
     tools = locate_tools(args.ffmpeg)
 
     if not args.skip_build:
-        build(layout, tools)
+        build(layout, tools, gpu=args.gpu)
     if not layout.exe.is_file():
         raise SystemExit(f"no executable at {layout.exe}; run without --skip-build first")
 
