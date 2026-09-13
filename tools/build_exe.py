@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="build a GPU-capable executable. 'bundled' (the default when the flag is "
         "given bare) carries cupy and the CUDA libraries, so the target machine needs "
-        "only an NVIDIA driver, 50-series cards included (+968 MiB, folder shape only). "
+        "only an NVIDIA driver, 50-series cards included (+882 MiB, folder shape only). "
         "'system' carries cupy alone and uses the CUDA Toolkit on the target machine, "
         "which must be 12.x and 12.8+ for a 50-series card (+145 MB, either shape). "
         "See the spec's 'The GPU builds'",

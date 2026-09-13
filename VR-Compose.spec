@@ -197,6 +197,14 @@ if GPU:
     hiddenimports += collect_submodules("cupy")
     hiddenimports += collect_submodules("cupy_backends")
     hiddenimports += ["cupyx", "cuda.pathfinder"]
+    # The `nvidia-*-cu12` wheels are a *build-time* source of libraries, never a runtime
+    # import: the spec reads files out of them and puts what it wants in `bin/`. Left in,
+    # PyInstaller collects the package and its 90 MB NVRTC lands a second time under
+    # `nvidia/cuda_nvrtc/bin/` -- without the builtins beside it, so a lookup that found
+    # that copy instead would fail at the first compile. Measured 2026-09-13, in both
+    # shapes; it is why a `system` build that carries no CUDA at all was 35 MiB fatter
+    # than it should have been.
+    excludes = ["nvidia"]
     # `graphlib` is imported by a *compiled* module in `cupy._core`, so nothing in any
     # source file mentions it and PyInstaller's analysis cannot see it. Without it
     # `import cupy` raises ModuleNotFoundError, which the device gate reads as "no GPU".
@@ -262,6 +270,20 @@ analysis = Analysis(
     optimize=0,
 )
 
+def _carried_on_purpose(dest):
+    """Keep a binary unless it is a CUDA library the analysis found for itself.
+
+    `bin/` is the only place a CUDA library belongs, and everything there was put there
+    above, deliberately. Matching on the base name rather than the whole destination is
+    what the first version of this got wrong: a second copy nested under `nvidia/` sailed
+    through a filter that only recognised the bare filename.
+    """
+    path = dest.replace("\\", "/").lower()
+    if path.startswith("bin/"):
+        return True
+    return not (path.startswith("nvidia/") or path.rsplit("/", 1)[-1] in CUDA_COLLECTED)
+
+
 if GPU:
     # **Everything CUDA that PyInstaller collected by itself is dropped** -- in both
     # modes. A `bundled` build keeps the three it put in `bin/` itself; a `system` build
@@ -285,7 +307,7 @@ if GPU:
     # root would compute a root that is a *temporary unpack directory* and break the same
     # way, while having a perfectly good toolkit on the machine to use instead.
     analysis.binaries = [
-        entry for entry in analysis.binaries if entry[0].lower() not in CUDA_COLLECTED
+        entry for entry in analysis.binaries if _carried_on_purpose(entry[0])
     ]
 
 archive = PYZ(analysis.pure)
