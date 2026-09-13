@@ -30,6 +30,14 @@ gpu = [
     # A 50-series Blackwell card is compute capability 120, so anything below 12.8 builds
     # it a cubin that will not load. 90 MB, and it is what `--gpu` puts in the bundle.
     "nvidia-cuda-nvrtc-cu12>=12.8",
+    # The other two halves of the same decision: with these, a `--gpu` build takes every
+    # CUDA library and header from wheels and the **build machine needs no CUDA toolkit
+    # installed at all**. cublas supplies `cublasLt64_12.dll`, which `import cupy` opens
+    # eagerly even though this project never calls cuBLAS; cuda-runtime supplies the
+    # `include/` that NVRTC reads when it compiles. Pinned to one CUDA version so a
+    # bundle is not a mix of whatever the machine happened to have.
+    "nvidia-cublas-cu12>=12.9",
+    "nvidia-cuda-runtime-cu12>=12.9",
 ]
 dev = [
     "pyinstaller>=6.10",   # 打包 exe（P8）

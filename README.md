@@ -280,7 +280,7 @@ catmullrom 在它上面比 bilinear 差，却对源还原好 1.24 dB。细节见
 
 | 命令 | 包体 | 目标机器要有 |
 |---|---|---|
-| `build_exe.py --gpu` | 文件夹 542 MiB → **1349 MiB** | NVIDIA 驱动，别的都不用（含 50 系） |
+| `build_exe.py --gpu` | 文件夹 542 MiB → **1510 MiB** | NVIDIA 驱动，别的都不用（含 50 系） |
 | `build_exe.py --gpu system` | 文件夹 +145 MB；单文件 213 → **311 MiB** | **CUDA Toolkit 12.x** 加驱动；50 系要 **12.8+** |
 
 `--gpu`（即 `--gpu bundled`）把 CUDA 库一起带走，只支持文件夹形态。`--gpu system` 只带 cupy、用目标机器自己的 toolkit，因此单文件也能带 GPU——代价是单文件每次启动都要解压整个包体，实测 **21–28 s** 才出命令行、约 18 s 才出窗口（文件夹版 0.78 s）。两种都一样：机器伺候不了就回退 CPU，`--device cuda` 打 Warning、GUI 的 `auto` 静默回退，作业照常跑。

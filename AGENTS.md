@@ -1563,7 +1563,9 @@ GPL 许可问题用户明确决定不处理（非商业软件）；
    CLI 默认 cpu，GUI 固定 auto；`cuda` 无卡或显存小于 12 GB 时 Warning 回退 CPU，`auto` 静默回退；
    与 CPU 逐字节一致，指标 D 不用改容差。
    发布 exe **默认不带** cupy（spec 显式 exclude）。要带就 `tools/build_exe.py --gpu`：
-   包体 542 MiB → 1349 MiB，目标机器只要 NVIDIA 驱动和一张 12 GB 的卡，不用装 CUDA、不用装 Python。
+   包体 542 MiB → 1510 MiB，目标机器只要 NVIDIA 驱动和一张 12 GB 的卡，不用装 CUDA、不用装 Python。
+   **打包机器也不用装 CUDA**（2026-09-13）：cuBLAS/NVRTC/头文件全部来自钉住的 `nvidia-*-cu12` 12.9 wheel，
+   不再读 `%CUDA_PATH%`。已在 `CUDA_PATH` 未设、`PATH` 里没有任何 CUDA 目录的环境下打包并渲染验证。
    2026-09-10 在无 CUDA 环境下实测冻结 exe 走 GPU，输出与 CPU 逐字节一致；细节见 spec 的「The GPU builds」。
    **卡的支持范围由 NVRTC 版本单独决定**（2026-09-11）：cupy 按 `min(卡, NVRTC 上限)` 编译、只出 SASS，
    上限写死为 12.0–12.7→sm_90、12.8→sm_120、12.9+→sm_121。50 系是算力 120，所以 `--gpu` 把
