@@ -42,6 +42,7 @@ from vr_compose.stitch import (
     DEFAULT_BAND_ROWS,
     DEFAULT_FEATHER_POWER,
     DEFAULT_SAMPLER,
+    DEFAULT_SEAM_BAND,
     SAMPLERS,
     BandStats,
     Panorama,
@@ -50,6 +51,7 @@ from vr_compose.stitch import (
     bilinear_blend,
     cubic_blend,
     luma_bt709,
+    narrow_to_band,
     quantise,
 )
 
@@ -105,6 +107,7 @@ def plan_fingerprint(
     tile_size: int,
     sampler: str = DEFAULT_SAMPLER,
     feather_power: float = DEFAULT_FEATHER_POWER,
+    seam_band: float = DEFAULT_SEAM_BAND,
 ) -> str:
     """Identifies everything the plan depends on. Same fingerprint, same numbers."""
     payload = {
@@ -118,6 +121,7 @@ def plan_fingerprint(
         "tile": tile_size,
         "sampler": sampler,
         "feather": feather_power,
+        "seam_band": seam_band,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return digest[:16]
@@ -154,6 +158,10 @@ class WarpPlan:
     build_seconds: float
     sampler: str = DEFAULT_SAMPLER
     feather_power: float = DEFAULT_FEATHER_POWER
+    seam_band: float = DEFAULT_SEAM_BAND
+    """How much of the overlap actually changes hands; see
+    :data:`vr_compose.stitch.DEFAULT_SEAM_BAND`. Baked into `weight` at build time, so
+    nothing downstream -- including the CUDA kernels -- knows it exists."""
 
     @property
     def entries(self) -> int:
@@ -177,6 +185,7 @@ class WarpPlan:
         band_rows: int = DEFAULT_BAND_ROWS,
         sampler: str = DEFAULT_SAMPLER,
         feather_power: float = DEFAULT_FEATHER_POWER,
+        seam_band: float = DEFAULT_SEAM_BAND,
     ) -> WarpPlan:
         """Evaluate the geometry once. Mirrors :func:`stitch_bands` step for step."""
         if width != 2 * height:
@@ -185,6 +194,8 @@ class WarpPlan:
             raise ValueError(f"tile size must be positive, got {tile_size}")
         if sampler not in SAMPLERS:
             raise ValueError(f"sampler must be one of {SAMPLERS}, got {sampler!r}")
+        if not 0.0 < seam_band <= 1.0:
+            raise ValueError(f"seam_band must be in (0, 1], got {seam_band}")
         started = time.time()
         half = projection.half_extent(rig.fov_deg)
         views = rig.unique_views
@@ -233,26 +244,39 @@ class WarpPlan:
                 return np.zeros(0, dtype)
             return np.concatenate([part[column] for part in parts])
 
+        places = [joined(parts, 0, np.int32) for parts in chunks.values()]
+        # The band is `stitch.narrow_to_band` applied once, here, instead of per frame:
+        # it is a pure function of the weights, so the plan can carry the result and every
+        # consumer -- CPU, CUDA, a cached plan on disk -- stays none the wiser.
+        weights = narrow_to_band(
+            places,  # type: ignore[arg-type]
+            [joined(parts, 2, np.float32) for parts in chunks.values()],  # type: ignore[list-item]
+            width * height,
+            seam_band,
+        )
         tiles = tuple(
             TileContributors(
                 camera=index,
-                out_index=joined(parts, 0, np.int32),  # type: ignore[arg-type]
+                out_index=where,  # type: ignore[arg-type]
                 src_index=joined(parts, 1, np.int32),  # type: ignore[arg-type]
-                weight=joined(parts, 2, np.float32),  # type: ignore[arg-type]
+                weight=weight,
                 fx=joined(parts, 3, np.float32),  # type: ignore[arg-type]
                 fy=joined(parts, 4, np.float32),  # type: ignore[arg-type]
             )
-            for index, parts in chunks.items()
+            for (index, parts), where, weight in zip(chunks.items(), places, weights, strict=True)
         )
         return cls(
             width=width,
             height=height,
             tile_size=tile_size,
-            fingerprint=plan_fingerprint(rig, width, height, tile_size, sampler, feather_power),
+            fingerprint=plan_fingerprint(
+                rig, width, height, tile_size, sampler, feather_power, seam_band
+            ),
             tiles=tiles,
             build_seconds=time.time() - started,
             sampler=sampler,
             feather_power=feather_power,
+            seam_band=seam_band,
         )
 
     def _validate(self, tiles: dict[int, U8]) -> None:
@@ -398,6 +422,7 @@ class WarpPlan:
             "build_seconds": self.build_seconds,
             "sampler": self.sampler,
             "feather_power": self.feather_power,
+            "seam_band": self.seam_band,
         }
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode(), np.uint8)
         # numpy's stub types **kwds against `allow_pickle: bool`; the arrays are fine.
@@ -436,4 +461,5 @@ class WarpPlan:
             build_seconds=float(meta["build_seconds"]),
             sampler=str(meta["sampler"]),
             feather_power=float(meta["feather_power"]),
+            seam_band=float(meta.get("seam_band", DEFAULT_SEAM_BAND)),
         )

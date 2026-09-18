@@ -40,6 +40,7 @@ from vr_compose.stitch import (
     DEFAULT_BAND_ROWS,
     DEFAULT_FEATHER_POWER,
     DEFAULT_SAMPLER,
+    DEFAULT_SEAM_BAND,
     SAMPLERS,
     stitch_frame,
 )
@@ -219,13 +220,15 @@ def cmd_frame(args: argparse.Namespace) -> int:
         harmoniser = harmonise.Harmoniser(rig, tile, feather_power=args.feather_power)
         corrections = harmoniser.estimate(tiles)
         print(f"harmonise  : {corrections.describe()}")
+    if args.seam_band != DEFAULT_SEAM_BAND:
+        print(f"seam band  : {args.seam_band:g} of the leading camera's weight")
     if placement.device == "cuda" or corrections is not None:
         # The plan is the verified geometry evaluated once; the GPU (or the CPU, when a
         # correction is applied) only applies it. Uncorrected it is byte-identical to
         # `stitch_frame` -- tests/test_warp.py and test_warp_gpu.py hold that line.
         plan = WarpPlan.build(
             rig, width, width // 2, tile, band_rows=args.band_rows,
-            sampler=args.sampler, feather_power=args.feather_power,
+            sampler=args.sampler, feather_power=args.feather_power, seam_band=args.seam_band,
         )  # fmt: skip
         grids = corrections.grids if corrections is not None else None
         gpu = None
@@ -263,6 +266,7 @@ def cmd_frame(args: argparse.Namespace) -> int:
             sampler=args.sampler,
             feather_power=args.feather_power,
             bit_depth=args.bit_depth,
+            seam_band=args.seam_band,
         )
     elapsed = time.time() - started
     print(
@@ -289,6 +293,15 @@ HARMONISE_HELP = (
     "motion blur) out before blending; edges and texture are untouched. On by default so "
     "such renders pass the gate and blend without tile-shaped patches; --no-harmonise "
     "reproduces the P1 arithmetic byte for byte"
+)
+
+SEAM_BAND_HELP = (
+    "how much of the overlap between two cameras actually changes hands, as a share of "
+    "the leading camera's weight. 1.0 (default) blends the whole overlap, which is the "
+    "right answer when the cameras agree. Lower it when they do not: at 0.25 a direction "
+    "takes its picture from the one or two cameras that see it most centrally instead of "
+    "averaging four, so an object rendered in different places is drawn once rather than "
+    "as overlapping ghosts, and the changeover is still a ramp rather than a visible edge"
 )
 
 GATE_HELP = (
@@ -371,6 +384,7 @@ def cmd_master(
             warp_threads=args.warp_threads,
             sampler=args.sampler,
             feather_power=args.feather_power,
+            seam_band=args.seam_band,
             bit_depth=args.bit_depth,
             write_workers=args.write_workers,
             stats_every=args.stats_every,
@@ -559,6 +573,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             warp_threads=args.warp_threads,
             sampler=args.sampler,
             feather_power=args.feather_power,
+            seam_band=args.seam_band,
             stats_every=args.stats_every,
             resume=not args.no_resume,
             keep_segments=args.keep_segments,
@@ -791,7 +806,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--harmonise", action=argparse.BooleanOptionalAction, default=harmonise.DEFAULT_HARMONISE,
         help=HARMONISE_HELP,
     )  # fmt: skip
-    frame.add_argument("--gate", choices=list(pipeline.GATES), default="on", help=GATE_HELP)
+    frame.add_argument(
+        "--seam-band", type=float, default=DEFAULT_SEAM_BAND, help=SEAM_BAND_HELP,
+    )  # fmt: skip
+    frame.add_argument(
+        "--gate", choices=list(pipeline.GATES), default=pipeline.DEFAULT_GATE, help=GATE_HELP,
+    )  # fmt: skip
     frame.add_argument(
         "--bit-depth", type=int, default=8, choices=list(BIT_DEPTHS), help="output PNG depth"
     )
@@ -866,7 +886,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--harmonise", action=argparse.BooleanOptionalAction, default=harmonise.DEFAULT_HARMONISE,
         help=HARMONISE_HELP,
     )  # fmt: skip
-    sequence.add_argument("--gate", choices=list(pipeline.GATES), default="on", help=GATE_HELP)
+    sequence.add_argument(
+        "--seam-band", type=float, default=DEFAULT_SEAM_BAND, help=SEAM_BAND_HELP,
+    )  # fmt: skip
+    sequence.add_argument(
+        "--gate", choices=list(pipeline.GATES), default=pipeline.DEFAULT_GATE, help=GATE_HELP,
+    )  # fmt: skip
     sequence.add_argument(
         "--feather-power",
         type=float,

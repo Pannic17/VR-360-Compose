@@ -49,7 +49,13 @@ from vr_compose import encode, harmonise, io, memory, verify
 from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
-from vr_compose.stitch import BIT_DEPTHS, DEFAULT_FEATHER_POWER, DEFAULT_SAMPLER, StitchResult
+from vr_compose.stitch import (
+    BIT_DEPTHS,
+    DEFAULT_FEATHER_POWER,
+    DEFAULT_SAMPLER,
+    DEFAULT_SEAM_BAND,
+    StitchResult,
+)
 from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 
 U8 = npt.NDArray[np.uint8]
@@ -95,6 +101,8 @@ writers took 8-bit masters from 1.26 to 0.51 s/frame and 16-bit from 4.68 to 1.5
 
 
 GATES = ("on", "off")
+DEFAULT_GATE = "on"
+"""Checked by default: a wrong rig should stop the run, not be found in the delivery."""
 
 
 def default_decode_workers(device: str) -> int:
@@ -236,6 +244,10 @@ class SequenceJob:
     sampler: str = DEFAULT_SAMPLER
     """How a tile is read at a fractional position; see :data:`vr_compose.stitch.SAMPLERS`."""
     feather_power: float = DEFAULT_FEATHER_POWER
+    seam_band: float = DEFAULT_SEAM_BAND
+    """How much of the overlap changes hands between neighbouring tiles; see
+    :data:`vr_compose.stitch.DEFAULT_SEAM_BAND`. Part of the plan rather than the
+    frame, so moving it rebuilds the plan and then costs nothing per frame."""
     stats_every: int = 100
     """Run the geometry gate on frames 0, N, 2N, ... of the job."""
     resume: bool = True
@@ -258,7 +270,7 @@ class SequenceJob:
     """Take the smooth brightness differences between cameras out before blending (P9,
     :mod:`vr_compose.harmonise`). On by default so renders with per-view fog, exposure or
     motion blur come out clean and pass the gate; off reproduces P1's arithmetic exactly."""
-    gate: str = "on"
+    gate: str = DEFAULT_GATE
     """`on`: sample metric A every `stats_every` frames, warn above the warning tier and
     stop above the fatal one. `off`: never compute it."""
 
@@ -617,18 +629,25 @@ def run_sequence(
     if plan is None:
         say("building warp plan ...")
         plan = WarpPlan.build(
-            job.rig, *master, tile_size, sampler=job.sampler, feather_power=job.feather_power
+            job.rig,
+            *master,
+            tile_size,
+            sampler=job.sampler,
+            feather_power=job.feather_power,
+            seam_band=job.seam_band,
         )
         say(
             f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB, "
             f"{plan.sampler})"
         )
-    elif (plan.width, plan.height, plan.tile_size, plan.sampler, plan.feather_power) != (
-        *master,
-        tile_size,
-        job.sampler,
-        job.feather_power,
-    ):
+    elif (
+        plan.width,
+        plan.height,
+        plan.tile_size,
+        plan.sampler,
+        plan.feather_power,
+        plan.seam_band,
+    ) != (*master, tile_size, job.sampler, job.feather_power, job.seam_band):
         raise ValueError("the supplied warp plan does not match this job")
     warnings: list[str] = []
     warper, placement = _place_plan(plan, job.device, say, warnings)
@@ -923,6 +942,10 @@ class MasterJob:
     warp_threads: int = DEFAULT_THREADS
     sampler: str = DEFAULT_SAMPLER
     feather_power: float = DEFAULT_FEATHER_POWER
+    seam_band: float = DEFAULT_SEAM_BAND
+    """How much of the overlap changes hands between neighbouring tiles; see
+    :data:`vr_compose.stitch.DEFAULT_SEAM_BAND`. Part of the plan rather than the
+    frame, so moving it rebuilds the plan and then costs nothing per frame."""
     bit_depth: int = 8
     """8 for a delivery-comparable master, 16 to keep the resample's sub-level precision.
 
@@ -949,7 +972,7 @@ class MasterJob:
     """As :attr:`SequenceJob.device`."""
     harmonise: bool = harmonise.DEFAULT_HARMONISE
     """As :attr:`SequenceJob.harmonise`."""
-    gate: str = "on"
+    gate: str = DEFAULT_GATE
     """As :attr:`SequenceJob.gate`."""
 
     def __post_init__(self) -> None:
@@ -1060,18 +1083,20 @@ def run_master(
             tile_size,
             sampler=job.sampler,
             feather_power=job.feather_power,
+            seam_band=job.seam_band,
         )
         say(
             f"plan ready in {plan.build_seconds:.1f} s ({plan.nbytes / 2**20:.0f} MiB, "
             f"{plan.sampler})"
         )
-    elif (plan.width, plan.height, plan.tile_size, plan.sampler, plan.feather_power) != (
-        job.width,
-        job.height,
-        tile_size,
-        job.sampler,
-        job.feather_power,
-    ):
+    elif (
+        plan.width,
+        plan.height,
+        plan.tile_size,
+        plan.sampler,
+        plan.feather_power,
+        plan.seam_band,
+    ) != (job.width, job.height, tile_size, job.sampler, job.feather_power, job.seam_band):
         raise ValueError("the supplied warp plan does not match this job")
     warnings: list[str] = []
     warper, placement = _place_plan(plan, job.device, say, warnings)

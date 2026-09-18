@@ -231,3 +231,51 @@ def test_a_bad_feather_or_depth_is_refused(rig: Rig, tiles: dict[int, U8]) -> No
     plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE)
     with pytest.raises(ValueError, match="bit_depth"):
         plan.apply(tiles, bit_depth=12)
+
+
+@pytest.mark.parametrize("band", [1.0, 0.5, 0.2, 0.05])
+def test_the_seam_band_reaches_the_plan_and_still_matches_the_stitch(
+    rig: Rig, tiles: dict[int, U8], band: float
+) -> None:
+    """The band is baked into the plan's weights, so the one thing to prove is that the
+    baking and the stitcher's per-band version agree -- metric D, once per band."""
+    expected = stitch_frame(tiles, rig, WIDTH, seam_band=band).image
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, seam_band=band)
+    assert plan.seam_band == band
+    assert np.array_equal(plan.apply(tiles).image, expected)
+
+
+def test_a_narrower_band_really_narrows_it(rig: Rig, tiles: dict[int, U8]) -> None:
+    """Fewer tiles get a say as the band shrinks, and the default changes nothing."""
+    counts = {}
+    for band in (1.0, 0.5, 0.1):
+        plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, seam_band=band)
+        speaking = np.zeros(plan.width * plan.height, np.int32)
+        for tile in plan.tiles:
+            speaking[tile.out_index[tile.weight > 0.0]] += 1
+        counts[band] = float(speaking.mean())
+    assert counts[1.0] > counts[0.5] > counts[0.1] > 1.0, counts
+    # every direction keeps at least its leader, whatever the band
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, seam_band=0.01)
+    left = np.zeros(plan.width * plan.height, np.int32)
+    for tile in plan.tiles:
+        left[tile.out_index[tile.weight > 0.0]] += 1
+    assert left.min() >= 1
+
+
+def test_the_seam_band_is_in_the_fingerprint(rig: Rig) -> None:
+    """Two plans that weight differently must not share a cache entry."""
+    assert plan_fingerprint(rig, 512, 256, 96) != plan_fingerprint(rig, 512, 256, 96, seam_band=0.2)
+
+
+def test_a_narrow_band_changes_the_picture_but_not_the_gate(
+    rig: Rig, tiles: dict[int, U8], plan: WarpPlan
+) -> None:
+    """A tile that loses its say still gets counted. The gate asks about the render, not
+    about the blend, so it has to read the same whatever the band is set to."""
+    narrow = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, seam_band=0.2)
+    wide = plan.apply(tiles, with_stats=True)
+    tight = narrow.apply(tiles, with_stats=True)
+    assert not np.array_equal(wide.image, tight.image)
+    assert verify.agreement(wide.stats) == verify.agreement(tight.stats)
+    assert np.array_equal(wide.stats.count, tight.stats.count)

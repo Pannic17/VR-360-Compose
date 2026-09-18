@@ -617,3 +617,58 @@ def test_harmonise_is_on_by_default_and_only_the_no_is_sent(
         assert argv is not None and "--no-harmonise" in argv
     finally:
         window.close()
+
+
+def test_the_three_blend_knobs_send_only_a_deviation(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    """Feather power, seam band and the gate: independent, defaults from the library, and
+    silent in the argv until they are moved, so a default run is the argv it always was."""
+    from vr_compose.stitch import DEFAULT_FEATHER_POWER, DEFAULT_SEAM_BAND
+
+    _source(tmp_path / "src")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "src"))
+        window.discover()
+        window.frames_edit.setText("1-3")
+        assert window.feather_spin.value() == DEFAULT_FEATHER_POWER
+        assert window.seam_spin.value() == DEFAULT_SEAM_BAND
+        assert window.gate_combo.currentText() == pipeline.DEFAULT_GATE
+        argv = window.build_command()
+        assert argv is not None
+        for absent in ("--feather-power", "--seam-band", "--gate"):
+            assert absent not in argv, absent
+
+        window.seam_spin.setValue(0.25)
+        argv = window.build_command()
+        assert argv is not None
+        assert argv[argv.index("--seam-band") + 1] == "0.25"
+        assert "--feather-power" not in argv and "--gate" not in argv, "one knob each"
+
+        window.feather_spin.setValue(8.0)
+        window.gate_combo.setCurrentText("off")
+        argv = window.build_command()
+        assert argv is not None
+        assert argv[argv.index("--feather-power") + 1] == "8"
+        assert argv[argv.index("--gate") + 1] == "off"
+    finally:
+        window.close()
+
+
+def test_the_blend_knobs_cannot_reach_a_value_the_library_refuses(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    from PySide6.QtWidgets import QDoubleSpinBox
+
+    window = ComposeWindow()
+    try:
+        feather: QDoubleSpinBox = window.feather_spin
+        seam: QDoubleSpinBox = window.seam_spin
+        assert feather.minimum() > 0.0 and feather.maximum() == 32.0
+        assert seam.minimum() > 0.0 and seam.maximum() == 1.0
+        assert [window.gate_combo.itemText(i) for i in range(window.gate_combo.count())] == list(
+            pipeline.GATES
+        )
+    finally:
+        window.close()

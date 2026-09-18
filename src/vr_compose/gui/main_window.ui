@@ -233,7 +233,45 @@
           <item row="2" column="5">
            <widget class="QComboBox" name="bitDepthComboBox"/>
           </item>
-          <item row="3" column="0" colspan="6">
+          <item row="3" column="0">
+           <widget class="QLabel" name="featherPowerLabel">
+            <property name="text"><string>羽化指数</string></property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QDoubleSpinBox" name="featherPowerSpinBox">
+            <property name="decimals"><number>1</number></property>
+            <property name="minimum"><double>0.500000000000000</double></property>
+            <property name="maximum"><double>32.000000000000000</double></property>
+            <property name="singleStep"><double>0.500000000000000</double></property>
+            <property name="toolTip"><string>混合权重是「到 tile 边缘的距离」的这个次方，越大越偏向看得最正的那一片相机。相机之间对不齐时调高能让细长的东西实起来；默认 2。</string></property>
+           </widget>
+          </item>
+          <item row="3" column="2">
+           <widget class="QLabel" name="seamBandLabel">
+            <property name="text"><string>接缝带宽</string></property>
+           </widget>
+          </item>
+          <item row="3" column="3">
+           <widget class="QDoubleSpinBox" name="seamBandSpinBox">
+            <property name="decimals"><number>2</number></property>
+            <property name="minimum"><double>0.010000000000000</double></property>
+            <property name="maximum"><double>1.000000000000000</double></property>
+            <property name="singleStep"><double>0.050000000000000</double></property>
+            <property name="toolTip"><string>两台相机的重叠区里，有多大比例真的参与交接。1.00（默认）＝整个重叠区都混合，相机彼此对得上时这是对的。相机对不齐、或会动的东西在各相机里位置不同时调小：0.25 表示每个方向只由看得最正的一两台相机出图，物体只被画一次而不是叠成几个半透明的影子，交接仍然是渐变而不是硬边。</string></property>
+           </widget>
+          </item>
+          <item row="3" column="4">
+           <widget class="QLabel" name="gateLabel">
+            <property name="text"><string>几何门</string></property>
+           </widget>
+          </item>
+          <item row="3" column="5">
+           <widget class="QComboBox" name="gateComboBox">
+            <property name="toolTip"><string>每隔若干帧量一次相邻相机在同一方向上的分歧：中位 1.0 / 均值 1.5 以上警告，2.5 / 4.0 以上停机，免得拿错的装配跑完一整趟。关掉只是不再检查，不改变画面 —— 给装配确实对不齐、但仍然要出片的数据用。</string></property>
+           </widget>
+          </item>
+          <item row="4" column="0" colspan="6">
            <widget class="QCheckBox" name="harmoniseCheckBox">
             <property name="text"><string>光度校正：抹平各相机之间雾、曝光、运动模糊造成的亮度差（只动低频，不动细节）</string></property>
             <property name="toolTip"><string>渲染器按每个视口单独计算体积雾、曝光、运动模糊，相邻相机看同一方向会差几级亮度，拼出来有 tile 形状的色块。开着时把这种平滑的差异在混合前扣掉；本来一致的数据几乎不受影响。关掉则输出与 P1 基准逐字节相同。</string></property>

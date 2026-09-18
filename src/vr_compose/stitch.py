@@ -39,12 +39,14 @@ __all__ = [
     "BIT_DEPTHS",
     "DEFAULT_FEATHER_POWER",
     "DEFAULT_SAMPLER",
+    "DEFAULT_SEAM_BAND",
     "SAMPLERS",
     "BandStats",
     "StitchResult",
     "bilinear_blend",
     "catmull_rom_weights",
     "cubic_blend",
+    "narrow_to_band",
     "stitch_bands",
     "stitch_frame",
 ]
@@ -253,6 +255,64 @@ costs detail. ROADMAP P4 records what the sweep found.
 """
 
 
+DEFAULT_SEAM_BAND = 1.0
+"""How wide the changeover between tiles is, as a share of the leading tile's weight.
+
+The exponent above decides *how sharply* the blend prefers the most central tile; this
+decides **over how much of the overlap that preference is acted on at all**. A tile whose
+feather weight is `w` where the best tile has `w_max` keeps
+
+    max((w - (1 - band) * w_max) / band, 0)
+
+so at `band = 1` -- the default -- every weight comes through untouched and the arithmetic
+is P1's to the bit, while a smaller band drops every tile that is not within `band` of the
+leader and ramps the rest in linearly. `band -> 0` is winner-take-all.
+
+**Why it exists.** P10 tried assembling the detail from a single tile a direction
+(`--two-band`, reverted): it removed the ghosting of a render whose cameras disagree, and
+put a hard, straight seam through open water where the winner changed, cutting fish in
+half. That is the `band = 0` corner. A small but non-zero band keeps the good half of the
+idea -- most directions come from one tile, so nothing is averaged into a ghost -- and
+crosses over continuously, so there is no edge to see. Unlike the exponent it does not
+touch *which* tile leads, only how much company it keeps, so it costs no sharpness where
+the tiles do agree. Measured on the Bay render: AGENTS.md section 3.
+
+**The tiles that lose their say are not dropped.** They keep contributing to
+:class:`BandStats`, because the geometry gate asks whether the cameras that *see* a
+direction agree about it -- a question about the render, which must not change with the
+way the picture happens to be assembled. Discarding their entries would also shrink the
+plan, which is exactly the trade not to take.
+"""
+
+
+def narrow_to_band(positions: list[I32], weights: list[F32], pixels: int, band: float) -> list[F32]:
+    """Re-weight contributors so only the leading tiles at each direction keep any say.
+
+    `positions[i]` are the output pixels tile `i` reaches and `weights[i]` its feather
+    weight there; both come back transformed by :data:`DEFAULT_SEAM_BAND`'s formula. One
+    function for both blends -- :func:`stitch_bands` hands it a band's worth of local
+    indices and :class:`vr_compose.warp.WarpPlan` its stored `out_index` -- so the plan
+    cannot drift from the stitcher, which is what metric D rests on.
+
+    The leader is found the same way :meth:`vr_compose.warp.WarpPlan.apply` accumulates:
+    a tile reaches each output pixel at most once, so a masked write is enough and no
+    scatter-max is needed.
+    """
+    if not 0.0 < band <= 1.0:
+        raise ValueError(f"seam band must be in (0, 1], got {band}")
+    if band == 1.0:
+        return weights
+    leader = np.zeros(pixels, np.float32)
+    for where, w in zip(positions, weights, strict=True):
+        gain = w > leader[where]
+        leader[where[gain]] = w[gain]
+    shed, scale = np.float32(1.0 - band), np.float32(1.0 / band)
+    return [
+        np.asarray(np.maximum((w - shed * leader[where]) * scale, 0.0), dtype=np.float32)
+        for where, w in zip(positions, weights, strict=True)
+    ]
+
+
 def _feather(x: F64, y: F64, half: float, power: float = DEFAULT_FEATHER_POWER) -> F32:
     """Blend weight falling to zero at the tile border.
 
@@ -280,12 +340,18 @@ def stitch_bands(
     sampler: str = DEFAULT_SAMPLER,
     feather_power: float = DEFAULT_FEATHER_POWER,
     bit_depth: int = 8,
+    seam_band: float = DEFAULT_SEAM_BAND,
 ) -> StitchResult:
     """Blend `tiles` into a ``height x width x 3`` panorama, one horizontal band at a time.
 
     `tiles` maps a 1-based camera index to an ``(n, n, 3)`` uint8 array. Only the rig's
     unique indices are required; extra entries are ignored, so a caller may hand over all
     20 files or just the 15 distinct ones.
+
+    `seam_band` narrows the changeover between tiles; see :data:`DEFAULT_SEAM_BAND`. The
+    geometry is evaluated before any sampling so the leading weight is known, which costs
+    one pass over the band's projections and is why this stays the reference rather than
+    the throughput path.
     """
     if width != 2 * height:
         raise ValueError(f"equirect output must be 2:1, got {width}x{height}")
@@ -293,6 +359,8 @@ def stitch_bands(
         raise ValueError(f"sampler must be one of {SAMPLERS}, got {sampler!r}")
     if not 0.0 < feather_power <= 32.0:
         raise ValueError(f"feather_power must be in (0, 32], got {feather_power}")
+    if not 0.0 < seam_band <= 1.0:
+        raise ValueError(f"seam_band must be in (0, 1], got {seam_band}")
     if bit_depth not in BIT_DEPTHS:
         raise ValueError(f"bit_depth must be one of {BIT_DEPTHS}, got {bit_depth}")
     views = rig.unique_views
@@ -321,12 +389,24 @@ def stitch_bands(
         weight = np.zeros(pixels, np.float32)
         band = BandStats.zeros(pixels)
 
+        # First the geometry alone: the seam band needs the leading weight at every
+        # direction before any tile's samples are worth fetching. With the band left at 1
+        # this changes nothing about the arithmetic -- the weights come back as they went.
+        reached: list[tuple[int, F64, F64, npt.NDArray[np.bool_]]] = []
+        feathers: list[F32] = []
+        places: list[I32] = []
         for index, view in views.items():
             x, y, visible = projection.project_to_tile(
                 dirs, view.yaw, view.elevation, rig.fov_deg, mirrored=rig.mirrored
             )
             if not visible.any():
                 continue
+            reached.append((index, x, y, visible))
+            feathers.append(_feather(x[visible], y[visible], half, feather_power))
+            places.append(np.flatnonzero(visible).astype(np.int32))
+        feathers = narrow_to_band(places, feathers, pixels, seam_band)
+
+        for (index, x, y, visible), w in zip(reached, feathers, strict=True):
             tile = tiles[index]
             if sampler == "nearest":
                 column, row = projection.tile_pixel_index(
@@ -365,7 +445,6 @@ def stitch_bands(
                 sampled = cubic_blend(
                     (tap_row(0), tap_row(1), tap_row(2), tap_row(3)), fx, fy
                 )  # fmt: skip
-            w = _feather(x[visible], y[visible], half, feather_power)
             colour[visible] += sampled * w[:, None]
             weight[visible] += w
             luma = luma_bt709(sampled)
@@ -389,6 +468,7 @@ def stitch_frame(
     sampler: str = DEFAULT_SAMPLER,
     feather_power: float = DEFAULT_FEATHER_POWER,
     bit_depth: int = 8,
+    seam_band: float = DEFAULT_SEAM_BAND,
 ) -> StitchResult:
     """:func:`stitch_bands` with the 2:1 height implied by `width`."""
     if width % 2:
@@ -402,4 +482,5 @@ def stitch_frame(
         sampler=sampler,
         feather_power=feather_power,
         bit_depth=bit_depth,
+        seam_band=seam_band,
     )

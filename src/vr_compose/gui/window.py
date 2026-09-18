@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QLabel,
     QLineEdit,
@@ -54,7 +55,13 @@ from vr_compose import source as source_mod
 from vr_compose.device import GUI_DEVICE
 from vr_compose.harmonise import DEFAULT_HARMONISE
 from vr_compose.rig import UnknownRigError, rig_for
-from vr_compose.stitch import BIT_DEPTHS, DEFAULT_SAMPLER, SAMPLERS
+from vr_compose.stitch import (
+    BIT_DEPTHS,
+    DEFAULT_FEATHER_POWER,
+    DEFAULT_SAMPLER,
+    DEFAULT_SEAM_BAND,
+    SAMPLERS,
+)
 
 HERE = pathlib.Path(__file__).resolve().parent
 UI_FILE = HERE / "main_window.ui"
@@ -158,6 +165,9 @@ class ComposeWindow(QMainWindow):
         self.bitrate_combo: QComboBox = self._child(QComboBox, "bitrateComboBox")
         self.fps_combo: QComboBox = self._child(QComboBox, "fpsComboBox")
         self.sampler_combo: QComboBox = self._child(QComboBox, "samplerComboBox")
+        self.feather_spin: QDoubleSpinBox = self._child(QDoubleSpinBox, "featherPowerSpinBox")
+        self.seam_spin: QDoubleSpinBox = self._child(QDoubleSpinBox, "seamBandSpinBox")
+        self.gate_combo: QComboBox = self._child(QComboBox, "gateComboBox")
         self.harmonise_check: QCheckBox = self._child(QCheckBox, "harmoniseCheckBox")
         self.bit_depth_combo: QComboBox = self._child(QComboBox, "bitDepthComboBox")
         self.progress_bar: QProgressBar = self._child(QProgressBar, "progressBar")
@@ -194,6 +204,10 @@ class ComposeWindow(QMainWindow):
         self.fps_combo.addItems(["30", "60"])
         self.sampler_combo.addItems(list(SAMPLERS))
         self.sampler_combo.setCurrentText(DEFAULT_SAMPLER)
+        self.feather_spin.setValue(DEFAULT_FEATHER_POWER)
+        self.seam_spin.setValue(DEFAULT_SEAM_BAND)
+        self.gate_combo.addItems(list(pipeline.GATES))
+        self.gate_combo.setCurrentText(pipeline.DEFAULT_GATE)
         self.harmonise_check.setChecked(DEFAULT_HARMONISE)
         self.bit_depth_combo.addItems([str(depth) for depth in BIT_DEPTHS])
         self._mode_changed()
@@ -362,6 +376,14 @@ class ComposeWindow(QMainWindow):
         ]
         if not self.harmonise_check.isChecked():
             argv.append("--no-harmonise")  # the default is the library's; only say "no"
+        # Same rule for the three below: send nothing unless the user moved it, so a
+        # default run is the argv it has always been.
+        if self.feather_spin.value() != DEFAULT_FEATHER_POWER:
+            argv += ["--feather-power", f"{self.feather_spin.value():g}"]
+        if self.seam_spin.value() != DEFAULT_SEAM_BAND:
+            argv += ["--seam-band", f"{self.seam_spin.value():g}"]
+        if self.gate_combo.currentText() != pipeline.DEFAULT_GATE:
+            argv += ["--gate", self.gate_combo.currentText()]
         if video:
             argv += [
                 "--size",
@@ -573,6 +595,10 @@ class ComposeWindow(QMainWindow):
             self.video_radio,
             self.frames_radio,
             self.sampler_combo,
+            self.feather_spin,
+            self.seam_spin,
+            self.gate_combo,
+            self.harmonise_check,
         ):
             widget.setEnabled(not running)
         if not running:
