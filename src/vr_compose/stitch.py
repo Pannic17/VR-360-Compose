@@ -282,6 +282,15 @@ the tiles do agree. Measured on the Bay render: AGENTS.md section 3.
 direction agree about it -- a question about the render, which must not change with the
 way the picture happens to be assembled. Discarding their entries would also shrink the
 plan, which is exactly the trade not to take.
+
+**Do not reach for this when the cameras are misaligned.** It is tempting -- that is the
+data whose objects come out transparent -- and it makes the *seam* worse. Averaging
+misaligned tiles blurs, so the changeover is a blurred band whatever the setting; a
+narrow band sharpens everything on either side of it and leaves that band alone, turning
+a gentle gradient in sharpness into a visible line. Measured on the Bay render, the
+sharp-blurred-sharp trough deepens from 1.38x to 1.65x while the brightness step across
+it barely moves, which is why a luma metric says the seam is gone and the eye does not.
+It is for renders whose cameras agree and whose *content* does not (AGENTS.md section 3).
 """
 
 

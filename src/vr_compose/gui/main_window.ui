@@ -258,7 +258,7 @@
             <property name="minimum"><double>0.010000000000000</double></property>
             <property name="maximum"><double>1.000000000000000</double></property>
             <property name="singleStep"><double>0.050000000000000</double></property>
-            <property name="toolTip"><string>两台相机的重叠区里，有多大比例真的参与交接。1.00（默认）＝整个重叠区都混合，相机彼此对得上时这是对的。相机对不齐、或会动的东西在各相机里位置不同时调小：0.25 表示每个方向只由看得最正的一两台相机出图，物体只被画一次而不是叠成几个半透明的影子，交接仍然是渐变而不是硬边。</string></property>
+            <property name="toolTip"><string>两台相机的重叠区里，有多大比例真的参与交接。1.00（默认）＝整个重叠区都混合，相机彼此对得上时这是对的。相机对不齐、或会动的东西在各相机里位置不同时调小：0.25 表示每个方向只由看得最正的一两台相机出图，物体只被画一次而不是叠成几个半透明的影子，交接仍然是渐变而不是硬边。注意：**相机本身对不齐的素材不要开** —— 那种数据平均起来本就发糊，把交接两侧变锐只会让中间那条糊带变成一条看得见的线。</string></property>
            </widget>
           </item>
           <item row="3" column="4">

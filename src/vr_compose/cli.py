@@ -301,7 +301,10 @@ SEAM_BAND_HELP = (
     "right answer when the cameras agree. Lower it when they do not: at 0.25 a direction "
     "takes its picture from the one or two cameras that see it most centrally instead of "
     "averaging four, so an object rendered in different places is drawn once rather than "
-    "as overlapping ghosts, and the changeover is still a ramp rather than a visible edge"
+    "as overlapping ghosts, and the changeover is still a ramp rather than a visible edge. "
+    "**Not for a render whose cameras are misaligned**: averaging those blurs whatever the "
+    "setting, and sharpening either side of the changeover turns the blurred band into a "
+    "visible line (AGENTS.md section 3)"
 )
 
 GATE_HELP = (
