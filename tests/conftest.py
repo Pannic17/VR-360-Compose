@@ -20,12 +20,21 @@ from vr_compose.rig import Rig
 
 U8 = npt.NDArray[np.uint8]
 
-REFERENCE_ROOT = pathlib.Path("E:/22")
+REFERENCE_CANDIDATES = (pathlib.Path("E:/360/0904"), pathlib.Path("E:/22"))
+"""Where the L_Cathedral reference set has lived. The machine's own layout is not the
+project's to decide, so the first one that exists wins and the rest of the suite does
+not care: it moved from `E:/22` to `E:/360/0904` on 2026-09-18."""
+
+REFERENCE_ROOT = next(
+    (path for path in REFERENCE_CANDIDATES if path.is_dir()), REFERENCE_CANDIDATES[0]
+)
 
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
-        "markers", "needs_reference_data: requires the read-only reference set at E:/22"
+        "markers",
+        "needs_reference_data: requires the read-only L_Cathedral reference set "
+        f"(looked for at {', '.join(str(p) for p in REFERENCE_CANDIDATES)})",
     )
 
 
