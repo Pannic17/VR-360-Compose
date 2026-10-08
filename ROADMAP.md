@@ -1060,6 +1060,27 @@ median > 2.5 或 mean > 4.0 才停——实测里所有 rig 级错误（镜像�
 
 ---
 
+## 实机生产验证场景（用户 2026-10-08 指定）
+
+上游的开发场景是 VR_TestUE56 的 `EP1_Hil`；**拿真实生产内容做验收时用这一组**：
+
+| 项 | 值 |
+|---|---|
+| UE 工程 | `E:\P4-FRGD\ga-depot\pj2026qt007\VR_ChimelongDemo`（UE 5.6，Perforce 工作区） |
+| 场景 | `Content/OF3D/Level/B_Bay_submerged_ships_3.umap`（`/Game/OF3D/Level/B_Bay_submerged_ships_3`） |
+| Sequence | `Content/Levels/layout/B_Bay_submerged_ships1v02.uasset`（`/Game/Levels/layout/B_Bay_submerged_ships1v02`） |
+| 验证帧 | 从 **Sequence 播放起点 + 600** 那一帧开始，帧数任意 |
+
+这正是 `E:\0910B`（现在在 `E:\360\0910B`）那一份的场景 —— AGENTS.md 第 3 节「`0910B` 是反例」、
+2.24 px 视差、P10 的「透过鱼看到背景」都出自它。所以它同时是三件事的验收场景：
+新上游的共节点在生产内容上是否成立、P10 `--seam-band` 在新上游的源上还需不需要、P11 的第 4 步。
+该工程里装着 Camera360，可以在同一场景、同一帧段上做新旧上游的对照。
+
+**现状（2026-10-08）**：VROpPanoramic 与 VROpCore 已作为**本机副本**装进那个工程（不进 Perforce），
+Editor 编译通过（上游 ROADMAP Q7）。上游驱动脚本还要把场景、Sequence、帧段做成参数，才能在那个工程里出数据。
+
+---
+
 ## P11 — 兼容上游新布局：15 目录与 20 目录并存（2026-09-22 记下，2026-10-08 改方案，未开工）
 
 **背景**：上游正在从 Camera360 换成自研的 UE 插件 **VROpPanoramic**
@@ -1132,7 +1153,8 @@ P11 的验收里必须有一组合成用例证明「只有 `Camera1..15` 的 20 
 3. 合成用例进 `tests/test_source.py` / `tests/test_rig.py`（conftest 已能为任意 rig 合成 tile），
    `ruff` / `mypy --strict` / `pytest` 全绿。
 4. 上游 VROpPanoramic 改名后的**第一份真实采集**（其 P5 验收）用 `vr-compose frame` 跑通，并与同场景的
-   Camera360 采集做一次对照。（上游的俯仰与 yaw 符号已在其 2026-09-22 首份采集上核对过，与第 3 节一致。）
+   Camera360 采集做一次对照。开发场景的采集已有（`EP1_Hil`，2 帧，512 px，2026-10-08）；
+   生产内容的那一次用上面的「实机生产验证场景」（起点 + 600 开始）。（上游的俯仰与 yaw 符号已在其 2026-09-22 首份采集上核对过，与第 3 节一致。）
 
 **工期**：比原方案小（只加一条注册 + 用例 + 文档），另加 (b) 那组合成用例。**现在就可以开工**，联调那一步等上游。
 
