@@ -152,6 +152,24 @@ def _select_stem(candidates: list[source_mod.SourceSet], stem: str | None) -> so
     raise SystemExit(f"no stem {stem!r} here; available: {available}")
 
 
+def _layout_note(rig: Rig) -> str | None:
+    """The line a run prints when its camera numbering does not prove the layout.
+
+    ROADMAP P11a: until the layout gate (P11b) exists, a 15-file set is stitched on the
+    strength of its numbering alone, and that is said rather than left silent.
+    """
+    if not rig.needs_layout_check:
+        return None
+    return (
+        f"layout     : NOT VERIFIED -- {rig.file_count} cameras numbered 1..{rig.file_count} "
+        "look the same as a larger set with directories missing; the layout gate that "
+        "tells them apart is not implemented yet"
+    )
+
+
+GATE_OFF_NOTE = "geometry   : gate off -- overlap agreement not judged"
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     found, searched = source_mod.discover(args.source)
     print(f"searched {len(searched)} location(s)\n")
@@ -174,6 +192,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
             )
             if rig.duplicate_indices:
                 print(f"redundant  : cameras {list(rig.duplicate_indices)} duplicate other views")
+            if (note := _layout_note(rig)) is not None:
+                print(note)
         except UnknownRigError as exc:
             print(f"rig        : UNKNOWN -- {exc}")
         print()
@@ -206,6 +226,8 @@ def cmd_frame(args: argparse.Namespace) -> int:
     indices = list(rig.unique_indices)
     print(f"source     : {chosen.root}  stem {chosen.stem!r}")
     print(f"rig        : {rig.name}, reading {len(indices)} of {rig.file_count} files")
+    if (note := _layout_note(rig)) is not None:
+        print(note)
     started = time.time()
     tiles = io.load_tiles(chosen, frame, indices, workers=args.decode_workers)
     decoded = time.time() - started
@@ -277,11 +299,15 @@ def cmd_frame(args: argparse.Namespace) -> int:
     print(f"wrap seam  : {verify.wrap_seam_error(result.image):.2f} / 255")
     report = verify.agreement(result.stats)
     print(report.report(args.sampler))
+    if args.gate == "off":
+        # The numbers are still worth printing -- `frame` is the diagnostic command --
+        # but with the gate off they are not a verdict, and not an exit code.
+        print(GATE_OFF_NOTE)
 
     if args.out is not None:
         size = io.write_png_atomically(args.out, result.image, compress_level=args.compress_level)
         print(f"wrote      : {args.out}  ({size / 2**20:.1f} MiB)")
-    return 0 if not report.fatal else 1
+    return 1 if report.fatal and args.gate == "on" else 0
 
 
 def _describe_device(device: str, detail: str) -> str:
@@ -310,7 +336,7 @@ SEAM_BAND_HELP = (
 GATE_HELP = (
     "the overlap-agreement gate sampled every --stats-every frames: 'on' (default) warns "
     "above median 1.0 / mean 1.5 and stops above 2.5 / 4.0 -- only a wrong rig gets that "
-    "far; 'off' skips it"
+    "far; 'off' skips it (for `frame`: still printed, but no longer the exit code)"
 )
 
 DEVICE_HELP = (
@@ -405,6 +431,8 @@ def cmd_master(
     report.say(
         f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
     )
+    if (note := _layout_note(rig)) is not None:
+        report.say(note)
     report.say(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
     report.say(
         f"master     : {width}x{width // 2} {job.bit_depth}-bit PNG at the input's own "
@@ -504,6 +532,8 @@ def cmd_master(
         warned = sum(not gate.passed for gate in summary.gate_reports)
         state = f"{warned} WARN" if warned else "PASS"
         report.say(f"geometry   : {gates} sampled frame(s) {state}, worst median {worst:.2f}")
+    elif job.gate == "off":
+        report.say(GATE_OFF_NOTE)
     if summary.peak.measured:
         report.say(f"memory     : {summary.peak.report()}")
     for warning in summary.warnings:
@@ -593,6 +623,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     report.say(
         f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
     )
+    if (note := _layout_note(rig)) is not None:
+        report.say(note)
     report.say(
         f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), "
         f"{len(job.segments())} segment(s) of up to {job.segment_frames}"
@@ -703,6 +735,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         warned = sum(not gate.passed for gate in gates)
         state = f"{warned} WARN" if warned else "PASS"
         report.say(f"geometry   : {len(gates)} sampled frame(s) {state}, worst median {worst:.2f}")
+    elif job.gate == "off":
+        report.say(GATE_OFF_NOTE)
     stream = summary.stream
     report.say(
         f"stream     : {stream.codec} {stream.profile} L{stream.level} {stream.tag} "

@@ -85,11 +85,16 @@ def make_source_tree(
     size: tuple[int, int] = (16, 16),
     digits: int = 4,
     tile_for: Callable[[int, int], U8] | None = None,
+    name_digits: int = 1,
 ) -> pathlib.Path:
-    """Write a synthetic source tree. `tile_for(camera_index, frame)` supplies pixels."""
+    """Write a synthetic source tree. `tile_for(camera_index, frame)` supplies pixels.
+
+    `name_digits=2` names the directories `Camera01..`, as VROpPanoramic does; Camera360
+    writes `Camera1..`.
+    """
     width, height = size
     for index in range(1, cameras + 1):
-        directory = root / f"Camera{index}"
+        directory = root / f"Camera{index:0{name_digits}d}"
         if inner:
             directory = directory / inner
         directory.mkdir(parents=True, exist_ok=True)

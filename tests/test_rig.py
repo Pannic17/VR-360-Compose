@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from vr_compose.rig import REGISTRY, Rig, UnknownRigError, View, rig_for, twenty_file_rig
+from vr_compose.rig import (
+    REGISTRY,
+    Rig,
+    UnknownRigError,
+    View,
+    fifteen_file_rig,
+    rig_for,
+    twenty_file_rig,
+)
 
 
 def test_view_normalises_yaw() -> None:
@@ -75,9 +83,44 @@ def test_rig_rejects_degenerate_definitions() -> None:
         Rig(name="wide", views=(View(0.0, 0.0), View(90.0, 0.0)), fov_deg=180.0)
 
 
-def test_registry_resolves_the_known_layout() -> None:
+def test_fifteen_file_rig_is_the_twenty_file_rigs_distinct_views_renumbered() -> None:
+    fifteen, twenty = fifteen_file_rig(), twenty_file_rig()
+    assert fifteen.file_count == 15
+    assert fifteen.views == tuple(twenty.unique_views.values())
+    assert (fifteen.fov_deg, fifteen.mirrored) == (twenty.fov_deg, twenty.mirrored)
+    assert fifteen.unique_indices == tuple(range(1, 16))
+    assert fifteen.duplicate_indices == ()
+
+
+def test_fifteen_file_rig_matches_the_roadmap_table() -> None:
+    """ROADMAP P11: camera k is sector (k-1)//3 at +45, -45, 0 for slot (k-1)%3."""
+    rig = fifteen_file_rig()
+    for k in range(1, 16):
+        sector, slot = divmod(k - 1, 3)
+        assert rig.view_for(k) == View(72.0 * sector, (45.0, -45.0, 0.0)[slot]), k
+
+
+def test_twenty_to_fifteen_numbering() -> None:
+    """ROADMAP P11's correspondence: 20-file `i` (not a multiple of 4) is 15-file `k`."""
+    fifteen, twenty = fifteen_file_rig(), twenty_file_rig()
+    for i in (i for i in range(1, 21) if i % 4):
+        k = 3 * ((i - 1) // 4) + (i - 1) % 4 + 1
+        assert twenty.view_for(i).normalised() == fifteen.view_for(k).normalised(), (i, k)
+    # and the files the 20-file rig actually reads map onto 1..15 in order
+    for k, i in enumerate(twenty.unique_indices, start=1):
+        assert twenty.view_for(i) == fifteen.view_for(k)
+
+
+def test_only_the_fifteen_file_layout_needs_a_layout_check() -> None:
+    """Contiguous 1..20 proves the 20-file layout; 1..15 could be a truncated 20."""
+    assert fifteen_file_rig().needs_layout_check is True
+    assert twenty_file_rig().needs_layout_check is False
+
+
+def test_registry_resolves_the_known_layouts() -> None:
     assert rig_for(20).name == "of3d-20"
-    assert set(REGISTRY) == {20}
+    assert rig_for(15).name == "of3d-15"
+    assert set(REGISTRY) == {15, 20}
 
 
 @pytest.mark.parametrize("count", [2, 6, 12, 19, 21, 40])

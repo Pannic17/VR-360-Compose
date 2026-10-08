@@ -1,7 +1,9 @@
 """Camera rig definitions: which orientation each source file was rendered from.
 
 The 20-file rig here was reverse-solved from the reference data and proved end-to-end;
-the method and the numbers are in AGENTS.md §3, and `tools/fit_rig.py` re-derives it.
+the method and the numbers are in AGENTS.md §3, and `tools/fit_rig.py` re-derives it. The
+15-file rig is the same 15 viewpoints without the duplicates, numbered 1..15 -- the layout
+the in-house upstream (VROpPanoramic) writes (ROADMAP P11).
 
 **A rig is data, not an assumption.** The source directory is a user-chosen parameter, so
 a set with a different camera count is a different rig and this module must refuse it
@@ -19,6 +21,7 @@ __all__ = [
     "Rig",
     "UnknownRigError",
     "View",
+    "fifteen_file_rig",
     "rig_for",
     "twenty_file_rig",
 ]
@@ -49,6 +52,11 @@ class Rig:
     fov_deg: float = 90.0
     mirrored: bool = True
     """Image-plane handedness. True matches the production output (AGENTS.md §3)."""
+    needs_layout_check: bool = False
+    """True when contiguous numbering does not prove the layout. A 15-file set numbered
+    1..15 looks exactly like a 20-file set whose last five directories went missing, and
+    read as the 15-file rig that set is mis-stitched. Only the pixels can tell them apart
+    (ROADMAP P11b's layout gate); until that exists the run says the layout is unverified."""
 
     def __post_init__(self) -> None:
         if len(self.views) < 2:
@@ -132,8 +140,26 @@ def twenty_file_rig() -> Rig:
     return Rig(name="of3d-20", views=tuple(views), fov_deg=90.0, mirrored=True)
 
 
-REGISTRY: dict[int, Rig] = {20: twenty_file_rig()}
-"""Registered rigs by source-file count. Only the 20-file layout is known so far."""
+def fifteen_file_rig() -> Rig:
+    """The 20-file rig's 15 distinct viewpoints, one file each, numbered 1..15.
+
+    Camera `k` is sector `(k-1) // 3` (yaw 72 deg apart) at elevation +45, -45, 0 for
+    `(k-1) % 3` = 0, 1, 2. The views are *taken from* :func:`twenty_file_rig` in file order
+    rather than written out again, so the two rigs cannot drift apart: stitching the same
+    15 tiles through either one gives the same bytes (ROADMAP P11, acceptance 1).
+    """
+    twenty = twenty_file_rig()
+    return Rig(
+        name="of3d-15",
+        views=tuple(twenty.unique_views.values()),
+        fov_deg=twenty.fov_deg,
+        mirrored=twenty.mirrored,
+        needs_layout_check=True,
+    )
+
+
+REGISTRY: dict[int, Rig] = {20: twenty_file_rig(), 15: fifteen_file_rig()}
+"""Registered rigs by source-file count: Camera360's 20 files and VROpPanoramic's 15."""
 
 
 def rig_for(file_count: int) -> Rig:

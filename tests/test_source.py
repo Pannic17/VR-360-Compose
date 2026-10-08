@@ -117,6 +117,26 @@ def test_non_contiguous_camera_numbering_is_refused(tmp_path: pathlib.Path) -> N
     assert any("numbering is not" in p for p in detected.problems)
 
 
+def test_zero_padded_camera_directories_are_the_same_numbers(tmp_path: pathlib.Path) -> None:
+    """VROpPanoramic writes `Camera01..Camera15` (ROADMAP P11)."""
+    make_source_tree(tmp_path, cameras=15, stem="EP1_Hil", frames=[1, 2], name_digits=2)
+    assert (tmp_path / "Camera01").is_dir()
+    found = [s for s in source.scan(tmp_path) if s.usable]
+    assert len(found) == 1
+    assert [camera.index for camera in found[0].cameras] == list(range(1, 16))
+
+
+def test_a_twenty_file_set_missing_a_middle_camera_is_refused(tmp_path: pathlib.Path) -> None:
+    """Only the numbering can say so: 19 directories are not a layout of their own."""
+    make_source_tree(tmp_path, cameras=20, stem="S", frames=[1])
+    for item in sorted((tmp_path / "Camera3").rglob("*"), reverse=True):
+        item.unlink() if item.is_file() else item.rmdir()
+    (tmp_path / "Camera3").rmdir()
+    detected = source.scan(tmp_path)[0]
+    assert any("numbering is not 1..19" in p for p in detected.problems)
+    assert not detected.usable
+
+
 def test_inconsistent_zero_padding_is_refused(tmp_path: pathlib.Path) -> None:
     make_source_tree(tmp_path, cameras=2, stem="S", frames=[1], digits=4)
     odd = tmp_path / "Camera1" / "Tempory" / "S.002.png"
