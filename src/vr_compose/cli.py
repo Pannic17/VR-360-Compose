@@ -31,7 +31,7 @@ from collections.abc import Sequence
 
 from tqdm import tqdm
 
-from vr_compose import __version__, encode, harmonise, io, pipeline, spherical, verify
+from vr_compose import __version__, encode, harmonise, io, layout, pipeline, spherical, verify
 from vr_compose import device as device_mod
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
@@ -152,18 +152,24 @@ def _select_stem(candidates: list[source_mod.SourceSet], stem: str | None) -> so
     raise SystemExit(f"no stem {stem!r} here; available: {available}")
 
 
-def _layout_note(rig: Rig) -> str | None:
-    """The line a run prints when its camera numbering does not prove the layout.
+def _layout_note(rig: Rig, layout_gate: str | None) -> str | None:
+    """What a report says up front about a layout its numbering does not prove.
 
-    ROADMAP P11a: until the layout gate (P11b) exists, a 15-file set is stitched on the
-    strength of its numbering alone, and that is said rather than left silent.
+    `layout_gate` is None for `discover`, which only looks; with the gate on, the run
+    itself reports the verdict, so there is nothing to say yet. Off is said out loud --
+    a check that was turned off must not just vanish from the report (ROADMAP P11).
     """
-    if not rig.needs_layout_check:
+    if not rig.needs_layout_check or layout_gate == "on":
         return None
+    count = rig.file_count
+    if layout_gate is None:
+        return (
+            f"layout     : {count} cameras numbered 1..{count} could also be a larger set "
+            "with directories missing; the layout gate checks them when a run starts"
+        )
     return (
-        f"layout     : NOT VERIFIED -- {rig.file_count} cameras numbered 1..{rig.file_count} "
-        "look the same as a larger set with directories missing; the layout gate that "
-        "tells them apart is not implemented yet"
+        f"layout     : layout gate off -- NOT VERIFIED that these {count} cameras are not "
+        "a larger set with directories missing"
     )
 
 
@@ -192,7 +198,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
             )
             if rig.duplicate_indices:
                 print(f"redundant  : cameras {list(rig.duplicate_indices)} duplicate other views")
-            if (note := _layout_note(rig)) is not None:
+            if (note := _layout_note(rig, None)) is not None:
                 print(note)
         except UnknownRigError as exc:
             print(f"rig        : UNKNOWN -- {exc}")
@@ -226,11 +232,19 @@ def cmd_frame(args: argparse.Namespace) -> int:
     indices = list(rig.unique_indices)
     print(f"source     : {chosen.root}  stem {chosen.stem!r}")
     print(f"rig        : {rig.name}, reading {len(indices)} of {rig.file_count} files")
-    if (note := _layout_note(rig)) is not None:
+    if (note := _layout_note(rig, args.layout_gate)) is not None:
         print(note)
     started = time.time()
     tiles = io.load_tiles(chosen, frame, indices, workers=args.decode_workers)
     decoded = time.time() - started
+    if rig.needs_layout_check and args.layout_gate == "on":
+        # Before stitching, like `sequence`: a refused layout produces no picture. To
+        # look at it anyway, `--layout-gate off`.
+        checked = layout.check(tiles, rig)
+        if not checked.passed:
+            raise SystemExit(checked.refusal())
+        print(checked.summary())
+        started += checked.seconds
 
     placement = device_mod.resolve_device(args.device)
     if placement.fell_back:
@@ -339,6 +353,13 @@ GATE_HELP = (
     "far; 'off' skips it (for `frame`: still printed, but no longer the exit code)"
 )
 
+LAYOUT_GATE_HELP = (
+    "for a 15-camera set only, whose numbering cannot prove it is not a 20-camera set "
+    "with Camera16..20 missing: 'on' (default) compares neighbouring cameras' first "
+    f"frame by position and stops above {layout.MAX_SHIFT_DEG:g} deg, or when the overlap "
+    "is too dark or flat to compare; 'off' skips it. Independent of --gate"
+)
+
 DEVICE_HELP = (
     "where the warp runs. 'cpu' (default) is the byte-exact reference; 'cuda' gives the "
     "same bytes from an NVIDIA GPU with at least 12 GB (needs `pip install "
@@ -421,6 +442,7 @@ def cmd_master(
             device=args.device,
             harmonise=args.harmonise,
             gate=args.gate,
+            layout_gate=args.layout_gate,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -431,7 +453,7 @@ def cmd_master(
     report.say(
         f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
     )
-    if (note := _layout_note(rig)) is not None:
+    if (note := _layout_note(rig, args.layout_gate)) is not None:
         report.say(note)
     report.say(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
     report.say(
@@ -500,6 +522,9 @@ def cmd_master(
         raise SystemExit(
             f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
         ) from None
+    except layout.LayoutGateFailed as exc:
+        report.event("error", kind="layout", message=str(exc))
+        raise SystemExit(f"stopped before stitching anything -- {exc}") from None
     except (pipeline.Cancelled, KeyboardInterrupt) as exc:
         detail = f" ({exc})" if isinstance(exc, pipeline.Cancelled) else ""
         report.event("cancelled", message=str(exc), output=str(job.directory))
@@ -534,6 +559,8 @@ def cmd_master(
         report.say(f"geometry   : {gates} sampled frame(s) {state}, worst median {worst:.2f}")
     elif job.gate == "off":
         report.say(GATE_OFF_NOTE)
+    if summary.layout_report is not None:
+        report.say(summary.layout_report.summary())
     if summary.peak.measured:
         report.say(f"memory     : {summary.peak.report()}")
     for warning in summary.warnings:
@@ -614,6 +641,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             device=args.device,
             harmonise=args.harmonise,
             gate=args.gate,
+            layout_gate=args.layout_gate,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -623,7 +651,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     report.say(
         f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
     )
-    if (note := _layout_note(rig)) is not None:
+    if (note := _layout_note(rig, args.layout_gate)) is not None:
         report.say(note)
     report.say(
         f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), "
@@ -698,6 +726,9 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"geometry gate FAILED -- stopping before wasting the run:\n{exc}"
         ) from None
+    except layout.LayoutGateFailed as exc:
+        report.event("error", kind="layout", message=str(exc))
+        raise SystemExit(f"stopped before stitching anything -- {exc}") from None
     # Cancelled is a RuntimeError, so it has to be caught before the failure branch below.
     except (pipeline.Cancelled, KeyboardInterrupt) as exc:
         detail = f" ({exc})" if isinstance(exc, pipeline.Cancelled) else ""
@@ -737,6 +768,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         report.say(f"geometry   : {len(gates)} sampled frame(s) {state}, worst median {worst:.2f}")
     elif job.gate == "off":
         report.say(GATE_OFF_NOTE)
+    if summary.layout_report is not None:
+        report.say(summary.layout_report.summary())
     stream = summary.stream
     report.say(
         f"stream     : {stream.codec} {stream.profile} L{stream.level} {stream.tag} "
@@ -850,6 +883,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--gate", choices=list(pipeline.GATES), default=pipeline.DEFAULT_GATE, help=GATE_HELP,
     )  # fmt: skip
     frame.add_argument(
+        "--layout-gate", choices=list(layout.LAYOUT_GATES), default=layout.DEFAULT_LAYOUT_GATE,
+        help=LAYOUT_GATE_HELP,
+    )  # fmt: skip
+    frame.add_argument(
         "--bit-depth", type=int, default=8, choices=list(BIT_DEPTHS), help="output PNG depth"
     )
     frame.add_argument(
@@ -928,6 +965,10 @@ def build_parser() -> argparse.ArgumentParser:
     )  # fmt: skip
     sequence.add_argument(
         "--gate", choices=list(pipeline.GATES), default=pipeline.DEFAULT_GATE, help=GATE_HELP,
+    )  # fmt: skip
+    sequence.add_argument(
+        "--layout-gate", choices=list(layout.LAYOUT_GATES), default=layout.DEFAULT_LAYOUT_GATE,
+        help=LAYOUT_GATE_HELP,
     )  # fmt: skip
     sequence.add_argument(
         "--feather-power",

@@ -45,7 +45,7 @@ import numpy as np
 import numpy.typing as npt
 
 from vr_compose import device as device_mod
-from vr_compose import encode, harmonise, io, memory, verify
+from vr_compose import encode, harmonise, io, layout, memory, verify
 from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
@@ -273,6 +273,11 @@ class SequenceJob:
     gate: str = DEFAULT_GATE
     """`on`: sample metric A every `stats_every` frames, warn above the warning tier and
     stop above the fatal one. `off`: never compute it."""
+    layout_gate: str = layout.DEFAULT_LAYOUT_GATE
+    """`on`: for a rig whose numbering does not prove its layout (the 15-file one), check
+    the first frame's camera positions before anything is stitched or written, and stop
+    if they disagree or cannot be compared (:mod:`vr_compose.layout`). `off`: skip it.
+    Independent of `gate`: each switch turns off only its own check (ROADMAP P11)."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -285,6 +290,10 @@ class SequenceJob:
             raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
         if self.gate not in GATES:
             raise ValueError(f"gate must be one of {GATES}, got {self.gate!r}")
+        if self.layout_gate not in layout.LAYOUT_GATES:
+            raise ValueError(
+                f"layout_gate must be one of {layout.LAYOUT_GATES}, got {self.layout_gate!r}"
+            )
         if self.decode_workers is not None and self.decode_workers < 1:
             raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
 
@@ -385,6 +394,8 @@ class Summary:
     """Where the warp actually ran -- `cpu` after a fallback, whatever was asked for."""
     device_detail: str = ""
     harmonised: bool = False
+    layout_report: layout.LayoutReport | None = None
+    """The layout gate's measurement, when it ran (a 15-file rig with the gate on)."""
 
     @property
     def seconds_per_frame(self) -> float:
@@ -443,6 +454,28 @@ class Warper(Protocol):
         bit_depth: int,
         corrections: dict[int, npt.NDArray[np.float32]] | None,
     ) -> StitchResult: ...
+
+
+def check_layout(
+    source: SourceSet, rig: Rig, frame: int, enabled: str, say: Callable[[str], None]
+) -> layout.LayoutReport | None:
+    """The layout gate, run once on `frame` before anything is stitched or written.
+
+    Only for a rig whose numbering does not prove its layout; the 20-file one is proved
+    by `1..20` and never pays for it. Raises :class:`layout.LayoutGateFailed` on FAIL and
+    on UNVERIFIABLE alike -- a layout that could not be checked is not a checked one.
+    """
+    if not rig.needs_layout_check:
+        return None
+    if enabled == "off":
+        say("layout gate off -- the camera numbering is not checked")
+        return None
+    tiles = io.load_tiles(source, frame, list(rig.unique_indices), workers=8)
+    report = layout.check(tiles, rig)
+    say(f"frame {frame}: {report.summary().removeprefix('layout     : ')}")
+    if not report.passed:
+        raise layout.LayoutGateFailed(report.refusal())
+    return report
 
 
 def _place_plan(
@@ -624,6 +657,7 @@ def run_sequence(
     tile_size = job.source.tile_size
     if tile_size is None:
         raise ValueError("source tiles are not square or not uniform; cannot stitch")
+    layout_report = check_layout(job.source, job.rig, job.frames[0], job.layout_gate, say)
     # The plan renders the *master*; ffmpeg resamples to the delivery size if they differ.
     master = (job.spec.master_width, job.spec.master_height)
     if plan is None:
@@ -789,6 +823,7 @@ def run_sequence(
         device=placement.device,
         device_detail=placement.detail,
         harmonised=harmoniser is not None,
+        layout_report=layout_report,
     )
 
 
@@ -974,6 +1009,8 @@ class MasterJob:
     """As :attr:`SequenceJob.harmonise`."""
     gate: str = DEFAULT_GATE
     """As :attr:`SequenceJob.gate`."""
+    layout_gate: str = layout.DEFAULT_LAYOUT_GATE
+    """As :attr:`SequenceJob.layout_gate`."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -982,6 +1019,10 @@ class MasterJob:
             raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
         if self.gate not in GATES:
             raise ValueError(f"gate must be one of {GATES}, got {self.gate!r}")
+        if self.layout_gate not in layout.LAYOUT_GATES:
+            raise ValueError(
+                f"layout_gate must be one of {layout.LAYOUT_GATES}, got {self.layout_gate!r}"
+            )
         if self.decode_workers is not None and self.decode_workers < 1:
             raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
         if self.width < 2 or self.width % 2:
@@ -1040,6 +1081,7 @@ class MasterSummary:
     device: str = device_mod.DEFAULT_DEVICE
     device_detail: str = ""
     harmonised: bool = False
+    layout_report: layout.LayoutReport | None = None
 
     @property
     def seconds_per_frame(self) -> float:
@@ -1064,6 +1106,7 @@ def run_master(
     if tile_size is None:
         raise ValueError("source tiles are not square or not uniform; cannot stitch")
 
+    layout_report = check_layout(job.source, job.rig, job.frames[0], job.layout_gate, say)
     todo = job.pending_frames()
     job.directory.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(job.directory).free
@@ -1201,4 +1244,5 @@ def run_master(
         device=placement.device,
         device_detail=placement.detail,
         harmonised=harmoniser is not None,
+        layout_report=layout_report,
     )

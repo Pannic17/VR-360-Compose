@@ -22,7 +22,7 @@ from collections.abc import Callable
 import pytest
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
-from vr_compose import pipeline
+from vr_compose import layout, pipeline
 from vr_compose.rig import twenty_file_rig
 
 pytest.importorskip("PySide6", reason="the GUI needs PySide6")
@@ -412,6 +412,18 @@ def test_progress_events_drive_the_bar_and_the_title(qt_app: QApplication) -> No
         window.close()
 
 
+def test_a_layout_refusal_says_what_to_do(qt_app: QApplication) -> None:
+    """The CLI's refusal is English and technical; the log adds what it means and the switch."""
+    window = ComposeWindow()
+    try:
+        window._handle_event({"event": "error", "kind": "layout", "message": "layout gate FAIL"})
+        text = window.log_edit.toPlainText()
+        assert "布局门拒绝" in text and "「布局门」设为 off" in text
+        assert "layout gate FAIL" in text
+    finally:
+        window.close()
+
+
 def test_worker_command_runs_this_interpreter() -> None:
     """From source the child is `python -m vr_compose`; frozen it is the exe itself."""
     command = worker_command()
@@ -637,7 +649,8 @@ def test_the_three_blend_knobs_send_only_a_deviation(
         assert window.gate_combo.currentText() == pipeline.DEFAULT_GATE
         argv = window.build_command()
         assert argv is not None
-        for absent in ("--feather-power", "--seam-band", "--gate"):
+        assert window.layout_gate_combo.currentText() == layout.DEFAULT_LAYOUT_GATE
+        for absent in ("--feather-power", "--seam-band", "--gate", "--layout-gate"):
             assert absent not in argv, absent
 
         window.seam_spin.setValue(0.25)
@@ -652,6 +665,14 @@ def test_the_three_blend_knobs_send_only_a_deviation(
         assert argv is not None
         assert argv[argv.index("--feather-power") + 1] == "8"
         assert argv[argv.index("--gate") + 1] == "off"
+        assert "--layout-gate" not in argv, "the two gates are separate switches"
+
+        window.gate_combo.setCurrentText(pipeline.DEFAULT_GATE)
+        window.layout_gate_combo.setCurrentText("off")
+        argv = window.build_command()
+        assert argv is not None
+        assert argv[argv.index("--layout-gate") + 1] == "off"
+        assert "--gate" not in argv
     finally:
         window.close()
 
@@ -670,5 +691,7 @@ def test_the_blend_knobs_cannot_reach_a_value_the_library_refuses(
         assert [window.gate_combo.itemText(i) for i in range(window.gate_combo.count())] == list(
             pipeline.GATES
         )
+        combo = window.layout_gate_combo
+        assert [combo.itemText(i) for i in range(combo.count())] == list(layout.LAYOUT_GATES)
     finally:
         window.close()

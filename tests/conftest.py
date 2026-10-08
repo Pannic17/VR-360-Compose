@@ -124,6 +124,26 @@ def analytic_panorama(width: int, height: int) -> U8:
     return np.asarray(np.clip(stacked, 0, 255).astype(np.uint8), dtype=np.uint8)
 
 
+def textured_panorama(width: int, height: int, *, seed: int = 0) -> U8:
+    """:func:`analytic_panorama` plus an aperiodic texture, for tests that phase-correlate.
+
+    The analytic panorama is too smooth for the layout gate (`vr_compose.layout`): its
+    128 px patches hold a gradient and nothing to lock onto. The texture is a sum of
+    plane waves in 3-D direction space -- continuous across the seam and the poles, with
+    random wavevectors so no shift lines it up with itself again.
+    """
+    dirs = projection.equirect_directions(width, height)
+    rng = np.random.default_rng(seed)
+    field = np.zeros(dirs.shape[1])
+    for _ in range(24):
+        wave = rng.normal(size=3)
+        wave *= rng.uniform(20.0, 150.0) / np.linalg.norm(wave)
+        field += np.sin(wave @ dirs + rng.uniform(0.0, 2.0 * np.pi))
+    texture = (field / np.sqrt(12.0) * 45.0).reshape(height, width, 1)
+    base = analytic_panorama(width, height).astype(np.float64) * 0.6 + 50.0
+    return np.asarray(np.clip(base + texture, 0, 255).astype(np.uint8), dtype=np.uint8)
+
+
 def sample_panorama_into_tile(panorama: U8, rig: Rig, index: int, size: int) -> U8:
     """Render one rig tile by sampling `panorama`, i.e. the inverse of stitching."""
     height, width = panorama.shape[:2]

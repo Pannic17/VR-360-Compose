@@ -110,8 +110,12 @@ def _write(root: pathlib.Path, tiles: dict[int, U8], *, name_digits: int = 1) ->
 
 
 def _frame(root: pathlib.Path, out: pathlib.Path, *extra: str) -> int:
-    argv = ["--source", str(root), "frame", "--width", str(WIDTH), "--out", str(out), *extra]
-    return main(argv)
+    """`frame` with the layout gate off: these smooth 96 px tiles have far too little
+    texture for it to compare (it would refuse them as UNVERIFIABLE), and what is tested
+    here is the stitch and the overlap-agreement gate. The layout gate has its own file,
+    `test_layout.py`, with tiles it can read."""
+    argv = ["--source", str(root), "frame", "--width", str(WIDTH), "--out", str(out)]
+    return main([*argv, "--layout-gate", "off", *extra])
 
 
 @pytest.mark.parametrize(
@@ -131,16 +135,16 @@ def test_frame_writes_the_same_png_for_both_layouts(
     assert (tmp_path / "20.png").read_bytes() == (tmp_path / "15.png").read_bytes()
 
 
-def test_a_fifteen_file_run_says_its_layout_is_unverified(
+def test_a_fifteen_file_run_with_the_layout_gate_off_says_so(
     tmp_path: pathlib.Path, twenty: dict[int, U8], capsys: pytest.CaptureFixture[str]
 ) -> None:
     src15 = _write(tmp_path, _renumbered(twenty, twenty_file_rig().unique_indices))
     assert _frame(src15, tmp_path / "out.png") == 0
     text = capsys.readouterr().out
     assert "of3d-15, reading 15 of 15 files" in text
-    assert "layout     : NOT VERIFIED" in text
+    assert "layout     : layout gate off -- NOT VERIFIED" in text
     assert main(["--source", str(src15), "discover"]) == 0
-    assert "layout     : NOT VERIFIED" in capsys.readouterr().out
+    assert "the layout gate checks them when a run starts" in capsys.readouterr().out
 
 
 def test_a_twenty_file_run_has_no_layout_line(
@@ -155,9 +159,9 @@ def test_a_truncated_twenty_file_set_fails_the_gate_and_gate_off_is_honoured(
 ) -> None:
     """`Camera1..15` of a 20-file set reads as the 15-file rig and is mis-stitched.
 
-    Until P11b's layout gate, the overlap-agreement gate is what notices -- here it does,
-    by a wide margin. And `frame --gate off` now means it: the numbers are printed, the
-    exit code no longer follows them (it used to return 1 regardless).
+    With the layout gate off, the overlap-agreement gate still notices -- by a wide
+    margin. And `frame --gate off` means it: the numbers are printed, the exit code no
+    longer follows them (it used to return 1 regardless).
     """
     truncated = _write(tmp_path / "src", {i: twenty[i] for i in range(1, 16)})
     assert _frame(truncated, tmp_path / "on.png") == 1
@@ -170,7 +174,7 @@ def test_a_truncated_twenty_file_set_fails_the_gate_and_gate_off_is_honoured(
     text = capsys.readouterr().out
     assert "verdict    : FAIL" in text, "the numbers are still printed"
     assert GATE_OFF_NOTE in text
-    assert "layout     : NOT VERIFIED" in text
+    assert "layout gate off -- NOT VERIFIED" in text
 
 
 def test_a_twenty_file_set_missing_its_last_camera_is_refused(

@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from vr_compose import __version__, encode, pipeline
+from vr_compose import __version__, encode, layout, pipeline
 from vr_compose import source as source_mod
 from vr_compose.device import GUI_DEVICE
 from vr_compose.harmonise import DEFAULT_HARMONISE
@@ -168,6 +168,7 @@ class ComposeWindow(QMainWindow):
         self.feather_spin: QDoubleSpinBox = self._child(QDoubleSpinBox, "featherPowerSpinBox")
         self.seam_spin: QDoubleSpinBox = self._child(QDoubleSpinBox, "seamBandSpinBox")
         self.gate_combo: QComboBox = self._child(QComboBox, "gateComboBox")
+        self.layout_gate_combo: QComboBox = self._child(QComboBox, "layoutGateComboBox")
         self.harmonise_check: QCheckBox = self._child(QCheckBox, "harmoniseCheckBox")
         self.bit_depth_combo: QComboBox = self._child(QComboBox, "bitDepthComboBox")
         self.progress_bar: QProgressBar = self._child(QProgressBar, "progressBar")
@@ -208,6 +209,8 @@ class ComposeWindow(QMainWindow):
         self.seam_spin.setValue(DEFAULT_SEAM_BAND)
         self.gate_combo.addItems(list(pipeline.GATES))
         self.gate_combo.setCurrentText(pipeline.DEFAULT_GATE)
+        self.layout_gate_combo.addItems(list(layout.LAYOUT_GATES))
+        self.layout_gate_combo.setCurrentText(layout.DEFAULT_LAYOUT_GATE)
         self.harmonise_check.setChecked(DEFAULT_HARMONISE)
         self.bit_depth_combo.addItems([str(depth) for depth in BIT_DEPTHS])
         self._mode_changed()
@@ -384,6 +387,8 @@ class ComposeWindow(QMainWindow):
             argv += ["--seam-band", f"{self.seam_spin.value():g}"]
         if self.gate_combo.currentText() != pipeline.DEFAULT_GATE:
             argv += ["--gate", self.gate_combo.currentText()]
+        if self.layout_gate_combo.currentText() != layout.DEFAULT_LAYOUT_GATE:
+            argv += ["--layout-gate", self.layout_gate_combo.currentText()]
         if video:
             argv += [
                 "--size",
@@ -506,6 +511,12 @@ class ComposeWindow(QMainWindow):
             self.log(str(event.get("message", "")))
         elif kind == "cancelled":
             self.log(f"已取消：{event.get('message', '')}")
+        elif kind == "error" and event.get("kind") == "layout":
+            self.log(
+                "布局门拒绝：相机编号与 15 路装配对不上，或重叠区太暗太平比不出来。"
+                "确认编号无误可把「布局门」设为 off。"
+            )
+            self.log(f"失败：{event.get('message', '')}")
         elif kind == "error":
             self.log(f"失败：{event.get('message', '')}")
         elif kind == "done":
@@ -598,6 +609,7 @@ class ComposeWindow(QMainWindow):
             self.feather_spin,
             self.seam_spin,
             self.gate_combo,
+            self.layout_gate_combo,
             self.harmonise_check,
         ):
             widget.setEnabled(not running)

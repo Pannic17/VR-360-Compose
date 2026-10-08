@@ -271,7 +271,17 @@
             <property name="toolTip"><string>每隔若干帧量一次相邻相机在同一方向上的分歧：中位 1.0 / 均值 1.5 以上警告，2.5 / 4.0 以上停机，免得拿错的装配跑完一整趟。关掉只是不再检查，不改变画面 —— 给装配确实对不齐、但仍然要出片的数据用。</string></property>
            </widget>
           </item>
-          <item row="4" column="0" colspan="6">
+          <item row="4" column="4">
+           <widget class="QLabel" name="layoutGateLabel">
+            <property name="text"><string>布局门</string></property>
+           </widget>
+          </item>
+          <item row="4" column="5">
+           <widget class="QComboBox" name="layoutGateComboBox">
+            <property name="toolTip"><string>只对 15 路来源起作用：光看目录分不出它和「缺了 Camera16..20 的 20 路采集」。开着时，开拼之前用首帧比相邻相机把同一方向画在哪里（只看位置，不看亮度），差超过 1° 就拒绝；重叠区太暗太平、比不出来也拒绝。关掉只是不再检查 —— 确认编号无误、但画面比不出来的数据（比如全黑的测试场景）才关。和几何门互不牵连。</string></property>
+           </widget>
+          </item>
+          <item row="5" column="0" colspan="6">
            <widget class="QCheckBox" name="harmoniseCheckBox">
             <property name="text"><string>光度校正：抹平各相机之间雾、曝光、运动模糊造成的亮度差（只动低频，不动细节）</string></property>
             <property name="toolTip"><string>渲染器按每个视口单独计算体积雾、曝光、运动模糊，相邻相机看同一方向会差几级亮度，拼出来有 tile 形状的色块。开着时把这种平滑的差异在混合前扣掉；本来一致的数据几乎不受影响。关掉则输出与 P1 基准逐字节相同。</string></property>
