@@ -1067,17 +1067,21 @@ median > 2.5 或 mean > 4.0 才停——实测里所有 rig 级错误（镜像�
 | 项 | 值 |
 |---|---|
 | UE 工程 | `E:\P4-FRGD\ga-depot\pj2026qt007\VR_ChimelongDemo`（UE 5.6，Perforce 工作区） |
-| 场景 | `Content/OF3D/Level/B_Bay_submerged_ships_3.umap`（`/Game/OF3D/Level/B_Bay_submerged_ships_3`） |
+| 场景 | `Content/OF3D/Level/B_Bay_submerged_ships_Demo.umap`（`/Game/OF3D/Level/B_Bay_submerged_ships_Demo`），不加载任何子关卡（用户 2026-10-08 定） |
 | Sequence | `Content/Levels/layout/B_Bay_submerged_ships1v02.uasset`（`/Game/Levels/layout/B_Bay_submerged_ships1v02`） |
 | 验证帧 | 从 **Sequence 播放起点 + 600** 那一帧开始，帧数任意 |
 
-这正是 `E:\0910B`（现在在 `E:\360\0910B`）那一份的场景 —— AGENTS.md 第 3 节「`0910B` 是反例」、
+按场景名，这就是 `E:\0910B`（现在在 `E:\360\0910B`）那一份的场景（那份 tile 的 stem 是 `B_Bay_submerged_ships`，
+这里的 Sequence 是 `…1v02`、地图是 `…_3`，大概是同一场景的后续版本）—— AGENTS.md 第 3 节「`0910B` 是反例」、
 2.24 px 视差、P10 的「透过鱼看到背景」都出自它。所以它同时是三件事的验收场景：
 新上游的共节点在生产内容上是否成立、P10 `--seam-band` 在新上游的源上还需不需要、P11 的第 4 步。
 该工程里装着 Camera360，可以在同一场景、同一帧段上做新旧上游的对照。
 
 **现状（2026-10-08）**：VROpPanoramic 与 VROpCore 已作为**本机副本**装进那个工程（不进 Perforce），
-Editor 编译通过（上游 ROADMAP Q7）。上游驱动脚本还要把场景、Sequence、帧段做成参数，才能在那个工程里出数据。
+Editor 编译通过（上游 ROADMAP Q7）。采集输出默认落在 `E:\VR-DEV\Render\VROpPanoramic\<时间戳>_<地图名>`，
+Camera360 对照在 `E:\VR-DEV\Render\Compare`。**地图用 `_Demo`（用户定）**：最初给的 `_3` 的所有灯光都在两个默认不加载的光照子关卡里，
+新旧上游渲出来都是黑的；`…1v02` 引用的是 `_Demo`，不加载子关卡时新旧上游都出正常画面。
+`_Demo` 第 600 帧过不了几何门，原因见 P11 的实测表。
 
 ---
 
@@ -1140,6 +1144,24 @@ yaw 72°/+45°，按 15 路会被解释成 yaw 72°/−45°），这正违反第
 **用户决定（2026-10-08）：(a) 为终态、(b) 为过渡。** 上游 H1 清单落地之前，靠几何门兜底，
 P11 的验收里必须有一组合成用例证明「只有 `Camera1..15` 的 20 路采集」会被致命级拦下；H1 落地后，
 15 路布局改为**必须带清单**才认（那一步另开一项，随上游 H1 一起做）。(c) 不做。
+
+**开工前的实测（2026-10-08，未改本仓库代码：实验脚本在内存里往 `REGISTRY` 加一条由
+`twenty_file_rig().unique_views` 按序组成的 15 路 rig，再调 `cli.main(["frame", ...])`，3840 宽，默认设置）**：
+
+| 输入 | 结果 |
+|---|---|
+| `E:\360\0904` 第 1700 帧，完整 20 目录 | PASS，median 0.44 / std>8 0.039% |
+| 同帧去重、重编号为 `Camera01..15` | PASS，指标与 20 路**完全相同**；但全景**不是逐字节一致**：680 个像素差 1 级（关 harmonise 亦然，开着是 869） |
+| 同帧只拷 `Camera1..15`（截断的 20 路） | **FAIL**，median 6.22 / mean 9.82 / std>8 41.6%，退出码 1 —— 兜底在这份数据上成立 |
+| 新上游生产采集 `_Demo` 第 600 帧（512 px tile，2048 宽） | **FAIL**，median 3.45 / std>8 26%；几何干净，是各视图自动曝光/雾/泛光不一致（harmonise 前 8.44 级），即 UPSTREAM 第 6 条，上游 C3 之前就是这样 |
+
+由此对 P11 的两点修正：
+
+1. 「同一帧逐字节一致」不是现成的结构性保证。用上面那种直接构造的 15 路 rig 有 ±1 级的差，P11 实现时要先查清
+   差从哪来（20 路 rig 的重复视角是否参与了某处的累加顺序），查清之前验收第 1 条不能按逐字节写。
+2. 几何门兜底**分不清「编号错位」和「光度不一致」**：上游 C3 落地之前，新上游的正确 15 路采集在
+   有雾/曝光差的场景上同样会被致命级拦下，只能 `--gate off` 出片，而那正好关掉了兜底。过渡期的兜底
+   只在光度干净的数据上可靠；这是上游 C3 与 H1 的优先级理由，记在这里。
 
 **不在本项范围**：新上游后续会输出 EXR / 16-bit（UPSTREAM.md 第 3 条，上游 A4），`FRAME_RE` 现在只认 `.png`，
 到时另开一项。
