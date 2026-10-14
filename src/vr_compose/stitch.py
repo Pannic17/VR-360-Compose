@@ -255,7 +255,7 @@ costs detail. ROADMAP P4 records what the sweep found.
 """
 
 
-DEFAULT_SEAM_BAND = 1.0
+DEFAULT_SEAM_BAND = 0.25
 """How wide the changeover between tiles is, as a share of the leading tile's weight.
 
 The exponent above decides *how sharply* the blend prefers the most central tile; this
@@ -264,9 +264,11 @@ feather weight is `w` where the best tile has `w_max` keeps
 
     max((w - (1 - band) * w_max) / band, 0)
 
-so at `band = 1` -- the default -- every weight comes through untouched and the arithmetic
-is P1's to the bit, while a smaller band drops every tile that is not within `band` of the
-leader and ramps the rest in linearly. `band -> 0` is winner-take-all.
+so at `band = 1` every weight comes through untouched and the arithmetic is P1's to the
+bit, while a smaller band drops every tile that is not within `band` of the leader and
+ramps the rest in linearly. `band -> 0` is winner-take-all. The default is 0.25: most
+directions come from the one or two tiles that see them most centrally, and
+`--seam-band 1` restores the whole-overlap average.
 
 **Why it exists.** P10 tried assembling the detail from a single tile a direction
 (`--two-band`, reverted): it removed the ghosting of a render whose cameras disagree, and
@@ -290,7 +292,10 @@ narrow band sharpens everything on either side of it and leaves that band alone,
 a gentle gradient in sharpness into a visible line. Measured on the Bay render, the
 sharp-blurred-sharp trough deepens from 1.38x to 1.65x while the brightness step across
 it barely moves, which is why a luma metric says the seam is gone and the eye does not.
-It is for renders whose cameras agree and whose *content* does not (AGENTS.md section 3).
+It is for renders whose cameras agree and whose *content* does not, and for the offset a
+post-process effect puts on every view alike: the production Bay scene shifts its views
+about 0.28 deg that way, and there the band recovers the overlap bands' detail with no
+visible changeover, which is what set the default (AGENTS.md section 3).
 """
 
 

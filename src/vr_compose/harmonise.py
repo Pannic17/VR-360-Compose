@@ -143,8 +143,11 @@ class Harmoniser:
     ) -> None:
         if width % 2:
             raise ValueError(f"coarse width must be even, got {width}")
+        # The estimate measures the cameras' disagreement over the whole overlap, so every
+        # tile keeps its say here whatever seam band the picture is blended with.
         self.plan = WarpPlan.build(
-            rig, width, width // 2, tile_size, sampler="bilinear", feather_power=feather_power
+            rig, width, width // 2, tile_size, sampler="bilinear", feather_power=feather_power,
+            seam_band=1.0,
         )
         self.grid = grid
         self.width, self.height = width, width // 2

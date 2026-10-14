@@ -331,20 +331,20 @@ def _describe_device(device: str, detail: str) -> str:
 HARMONISE_HELP = (
     "take the smooth brightness differences between cameras (per-view fog, exposure, "
     "motion blur) out before blending; edges and texture are untouched. On by default so "
-    "such renders pass the gate and blend without tile-shaped patches; --no-harmonise "
-    "reproduces the P1 arithmetic byte for byte"
+    "such renders pass the gate and blend without tile-shaped patches; --no-harmonise with "
+    "--seam-band 1 reproduces the P1 arithmetic byte for byte"
 )
 
 SEAM_BAND_HELP = (
     "how much of the overlap between two cameras actually changes hands, as a share of "
-    "the leading camera's weight. 1.0 (default) blends the whole overlap, which is the "
-    "right answer when the cameras agree. Lower it when they do not: at 0.25 a direction "
-    "takes its picture from the one or two cameras that see it most centrally instead of "
-    "averaging four, so an object rendered in different places is drawn once rather than "
-    "as overlapping ghosts, and the changeover is still a ramp rather than a visible edge. "
-    "**Not for a render whose cameras are misaligned**: averaging those blurs whatever the "
-    "setting, and sharpening either side of the changeover turns the blurred band into a "
-    "visible line (AGENTS.md section 3)"
+    "the leading camera's weight. At 0.25 (default) a direction takes its picture from the "
+    "one or two cameras that see it most centrally instead of averaging four, so an object "
+    "rendered in different places is drawn once rather than as overlapping ghosts, and the "
+    "changeover is still a ramp rather than a visible edge. 1.0 blends the whole overlap, "
+    "P1's arithmetic byte for byte, the right answer only when the cameras agree exactly. "
+    "A rig misaligned by parallax gets no help from a narrow band: averaging those blurs "
+    "whatever the setting, and sharpening either side of the changeover turns the blurred "
+    "band into a visible line; pass 1.0 there (AGENTS.md section 3)"
 )
 
 GATE_HELP = (

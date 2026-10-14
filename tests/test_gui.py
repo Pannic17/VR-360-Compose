@@ -653,10 +653,10 @@ def test_the_three_blend_knobs_send_only_a_deviation(
         for absent in ("--feather-power", "--seam-band", "--gate", "--layout-gate"):
             assert absent not in argv, absent
 
-        window.seam_spin.setValue(0.25)
+        window.seam_spin.setValue(0.5)
         argv = window.build_command()
         assert argv is not None
-        assert argv[argv.index("--seam-band") + 1] == "0.25"
+        assert argv[argv.index("--seam-band") + 1] == "0.5"
         assert "--feather-power" not in argv and "--gate" not in argv, "one knob each"
 
         window.feather_spin.setValue(8.0)

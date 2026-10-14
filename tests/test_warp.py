@@ -102,13 +102,17 @@ def test_every_output_pixel_has_at_least_one_contributor(plan: WarpPlan) -> None
     assert covered.all(), "the plan must cover the whole sphere, like the rig does"
 
 
-def test_contributor_lists_are_sorted_and_in_range(plan: WarpPlan) -> None:
-    """Sorted output indices are what make the banded threads correct and cache-friendly."""
+def test_contributor_lists_are_sorted_and_in_range(rig: Rig, plan: WarpPlan) -> None:
+    """Sorted output indices are what make the banded threads correct and cache-friendly.
+    A tile the seam band drops at a direction keeps its entry at weight zero (the gate
+    still reads it); only the whole-overlap plan has every weight positive."""
     for tile in plan.tiles:
         assert np.all(np.diff(tile.out_index) > 0), f"camera {tile.camera} not strictly ascending"
         assert tile.src_index.min() >= 0
         assert tile.src_index.max() < TILE * TILE
-        assert np.all(tile.weight > 0)
+        assert np.all(tile.weight >= 0)
+    whole = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, seam_band=1.0)
+    assert all(np.all(tile.weight > 0) for tile in whole.tiles)
 
 
 def test_mean_contributors_matches_the_coverage_analysis(plan: WarpPlan) -> None:
