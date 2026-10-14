@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import wave
 
 import numpy as np
 import pytest
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
 from vr_compose import __version__, encode
+from vr_compose.audio import AudioSpec
 from vr_compose.cli import _master_size, build_parser, main
 from vr_compose.rig import twenty_file_rig
 
@@ -256,6 +258,76 @@ def test_master_options_are_refused_for_mp4(tmp_path: pathlib.Path) -> None:
             ["--source", str(tmp_path / "src"), "sequence", "--compress-level", "9", "--no-bar"]
         )  # fmt: skip
     assert "only apply to --out-format png" in str(caught.value)
+
+
+def _wav(path: pathlib.Path, seconds: float = 1.0) -> pathlib.Path:
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(48_000)
+        handle.writeframes(np.zeros(int(seconds * 48_000), "<i2").tobytes())
+    return path
+
+
+def test_audio_is_refused_for_png_masters_and_its_format_without_a_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    _png_source(tmp_path / "src")
+    base = ["--source", str(tmp_path / "src"), "sequence", "--no-bar"]
+    with pytest.raises(SystemExit) as caught:
+        main([*base, "--out-format", "png", "--audio", str(_wav(tmp_path / "a.wav"))])
+    assert "--audio only apply to --out-format mp4" in str(caught.value)
+    for extra in (["--audio-bitrate", "128"], ["--audio-rate", "44100"], ["--audio-channels", "1"]):
+        with pytest.raises(SystemExit) as caught:
+            main([*base, *extra])
+        assert "only apply with --audio" in str(caught.value), extra
+    with pytest.raises(SystemExit) as caught:
+        main([*base, "--audio", str(tmp_path / "a.wav"), "--audio-bitrate", "8"])
+    assert "audio bitrate must be" in str(caught.value)
+
+
+def test_the_audio_options_reach_the_job(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import pipeline
+
+    _png_source(tmp_path / "src")
+    seen: list[pipeline.SequenceJob] = []
+
+    def capture(job: pipeline.SequenceJob, **_kwargs: object) -> None:
+        seen.append(job)
+        raise pipeline.Cancelled("stopped by the test")
+
+    monkeypatch.setattr(pipeline, "run_sequence", capture)
+    base = ["--source", str(tmp_path / "src"), "sequence", "--no-bar"]
+    wav = tmp_path / "a.wav"
+    with_format = ["--audio", str(wav), "--audio-rate", "44100", "--audio-channels", "1",
+                   "--audio-bitrate", "128"]  # fmt: skip
+    for extra in ([], ["--audio", str(wav)], with_format):
+        assert main([*base, *extra]) == 130
+    assert [job.audio for job in seen] == [
+        None,  # no file, no audio track
+        AudioSpec(wav),  # AAC 48 kHz stereo 192 kbps
+        AudioSpec(wav, bitrate_kbps=128, sample_rate=44_100, channels=1),
+    ]
+
+
+@pytest.mark.skipif(encode_tools() is None, reason="ffmpeg not available")
+def test_a_run_with_audio_reports_the_track(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _png_source(tmp_path / "src")
+    code = main(
+        ["--source", str(tmp_path / "src"), "sequence", "--size", "4k", "--stitch-at",
+         "delivery", "--frames", "1-2", "--audio", str(_wav(tmp_path / "a.wav", 3.0)),
+         "--out", str(tmp_path / "out.mp4"), "--no-bar"]
+    )  # fmt: skip
+    printed = capsys.readouterr().out
+    assert code == 0, printed
+    # 0.066 s, not 0.067: ffprobe reads it off the edit list, in milliseconds
+    assert "audio      : aac LC 48000 Hz 2 ch 0.066 s -- a.wav ->" in printed, printed
+    assert "the last 2.93 s cut" in printed
+    assert "conformance: OK" in printed
 
 
 def test_exr_says_why_it_is_not_implemented(tmp_path: pathlib.Path) -> None:

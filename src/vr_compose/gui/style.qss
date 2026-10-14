@@ -282,7 +282,9 @@ QPushButton[variant="primary"]:pressed {
 }
 
 QPushButton#browseSourceButton,
-QPushButton#browseOutputButton {
+QPushButton#browseOutputButton,
+QPushButton#browseAudioButton,
+QPushButton#clearAudioButton {
     min-width: 84px;
     min-height: 34px;
     max-height: 34px;

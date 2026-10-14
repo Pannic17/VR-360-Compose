@@ -29,6 +29,7 @@ import threading
 import numpy as np
 import numpy.typing as npt
 
+from vr_compose import audio as audio_mod
 from vr_compose import memory
 
 U8 = npt.NDArray[np.uint8]
@@ -120,8 +121,8 @@ class Tools:
         missing = [n for n in names if n not in self.encoders]
         if missing:
             raise FfmpegNotFound(
-                f"{self.ffmpeg} lacks encoder(s) {missing}; a build with libx264 and libx265 "
-                "is required (the distributed package ships one)"
+                f"{self.ffmpeg} lacks encoder(s) {missing}; a build with libx264, libx265 "
+                "and aac is required (the distributed package ships one)"
             )
 
 
@@ -168,10 +169,11 @@ def find_tools() -> Tools:
     listing = subprocess.run(
         [str(ffmpeg), "-hide_banner", "-encoders"], capture_output=True, text=True
     ).stdout
+    # Video and audio encoders both: the audio track (ROADMAP P14) needs `aac`.
     encoders = frozenset(
         line.split()[1]
         for line in listing.splitlines()
-        if line.startswith(" V") and len(line.split()) > 1
+        if line.startswith((" V", " A")) and len(line.split()) > 1
     )
     return Tools(ffmpeg=ffmpeg, ffprobe=ffprobe, version=version, encoders=encoders)
 
@@ -483,10 +485,24 @@ class StreamInfo:
     prove it agrees with itself; ffmpeg's `mov` demuxer is an independent implementation
     of the same spec, and it is the one a player is likely to share code with.
     """
+    audio_codec: str = ""
+    """The first audio stream, when there is one (ROADMAP P14); empty / zero otherwise."""
+    audio_profile: str = ""
+    audio_sample_rate: int = 0
+    audio_channels: int = 0
+    audio_start: float = 0.0
+    audio_duration: float = 0.0
 
-    def conformance_problems(self, spec: EncodeSpec, *, spherical: bool = False) -> list[str]:
+    def conformance_problems(
+        self,
+        spec: EncodeSpec,
+        *,
+        spherical: bool = False,
+        audio: audio_mod.AudioSpec | None = None,
+    ) -> list[str]:
         """Every spec field, as written. `spherical` for a finished delivery file only --
         segments are intermediates and carry no metadata, `-c copy` would drop it anyway.
+        `audio` likewise: the track is added by the join, so only the delivery has one.
         """
         problems: list[str] = []
         if spherical and self.projection != "equirectangular":
@@ -505,8 +521,30 @@ class StreamInfo:
             problems.append(f"{self.b_frames} B-frames")
         if any(interval != spec.gop for interval in self.i_intervals):
             problems.append(f"I-frame intervals {self.i_intervals} != {spec.gop}")
-        if self.audio_streams:
-            problems.append(f"{self.audio_streams} audio stream(s); the spec has none")
+        if audio is None:
+            if self.audio_streams:
+                problems.append(f"{self.audio_streams} audio stream(s); none was asked for")
+        else:
+            problems += self._audio_problems(spec, audio)
+        return problems
+
+    def _audio_problems(self, spec: EncodeSpec, audio: audio_mod.AudioSpec) -> list[str]:
+        if self.audio_streams != 1:
+            return [f"{self.audio_streams} audio stream(s); expected one"]
+        problems: list[str] = []
+        if (self.audio_codec, self.audio_profile) != ("aac", "LC"):
+            problems.append(f"audio {self.audio_codec} {self.audio_profile}, expected aac LC")
+        if self.audio_sample_rate != audio.sample_rate:
+            problems.append(f"audio sample rate {self.audio_sample_rate} != {audio.sample_rate}")
+        if self.audio_channels != audio.channels:
+            problems.append(f"audio channels {self.audio_channels} != {audio.channels}")
+        # In whole samples: ffprobe prints microseconds, and reads the duration from the
+        # edit list in the movie's millisecond timescale, so seconds do not compare exactly.
+        if round(abs(self.audio_start) * audio.sample_rate) > 1:
+            problems.append(f"audio starts at {self.audio_start:.6f} s, not on the first frame")
+        video = self.frames / spec.fps
+        if round(abs(self.audio_duration - video) * audio.sample_rate) > audio_mod.AAC_FRAME:
+            problems.append(f"audio lasts {self.audio_duration:.6f} s, the video {video:.6f} s")
         return problems
 
 
@@ -529,7 +567,8 @@ def probe(tools: Tools, path: pathlib.Path) -> StreamInfo:
         ).stdout
     )
     video = next(s for s in meta["streams"] if s["codec_type"] == "video")
-    audio = sum(1 for s in meta["streams"] if s["codec_type"] == "audio")
+    tracks = [s for s in meta["streams"] if s["codec_type"] == "audio"]
+    first: dict[str, object] = tracks[0] if tracks else {}
     raw_level = video.get("level")
     level = ""
     if isinstance(raw_level, (int, float)):
@@ -575,8 +614,14 @@ def probe(tools: Tools, path: pathlib.Path) -> StreamInfo:
         b_frames=types.count("B"),
         i_intervals=tuple(sorted({b - a for a, b in itertools.pairwise(i_positions)})),
         bitrate_mbps=int(meta["format"].get("bit_rate", 0)) / 1e6,
-        audio_streams=audio,
+        audio_streams=len(tracks),
         projection=projection,
+        audio_codec=str(first.get("codec_name", "")),
+        audio_profile=str(first.get("profile", "")),
+        audio_sample_rate=int(str(first.get("sample_rate", 0))),
+        audio_channels=int(str(first.get("channels", 0))),
+        audio_start=float(str(first.get("start_time", 0.0))),
+        audio_duration=float(str(first.get("duration", 0.0))),
     )
 
 
@@ -698,6 +743,25 @@ class SegmentWriter:
             self.abort()
 
 
+def _stream_args(audio: audio_mod.AudioPlan | None) -> list[str]:
+    """What the concat writes: the joined video alone, or the video plus the audio."""
+    if audio is None:
+        return ["-c", "copy"]
+    return [
+        "-i",
+        str(audio.spec.path),
+        "-filter_complex",
+        audio.filter_graph(source="1:a:0", label="aout"),
+        "-map",
+        "0:v:0",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "copy",
+        *audio.spec.codec_args(),
+    ]
+
+
 def _run_concat(command: list[str]) -> subprocess.CompletedProcess[str]:
     """Own process group, for the same reason the segment writers get one."""
     return subprocess.run(
@@ -705,8 +769,19 @@ def _run_concat(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def concat(tools: Tools, segments: list[pathlib.Path], output: pathlib.Path) -> pathlib.Path:
-    """Join segments losslessly. Valid because every segment starts on a closed GOP."""
+def concat(
+    tools: Tools,
+    segments: list[pathlib.Path],
+    output: pathlib.Path,
+    audio: audio_mod.AudioPlan | None = None,
+) -> pathlib.Path:
+    """Join segments losslessly. Valid because every segment starts on a closed GOP.
+
+    With `audio`, the same pass adds the audio track (ROADMAP P14): the video is still
+    copied, the audio is aligned, cut or padded and encoded by
+    :meth:`vr_compose.audio.AudioPlan.filter_graph`. Without it the command is exactly
+    the one it has always been, so a delivery without audio does not change by a byte.
+    """
     if not segments:
         raise ValueError("nothing to concatenate")
     listing = output.with_name(output.name + ".concat.txt")
@@ -728,8 +803,7 @@ def concat(tools: Tools, segments: list[pathlib.Path], output: pathlib.Path) -> 
                 "0",
                 "-i",
                 str(listing),
-                "-c",
-                "copy",
+                *_stream_args(audio),
                 "-movflags",
                 "+faststart",
                 "-fflags",

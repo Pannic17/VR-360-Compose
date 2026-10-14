@@ -695,3 +695,73 @@ def test_the_blend_knobs_cannot_reach_a_value_the_library_refuses(
         assert [combo.itemText(i) for i in range(combo.count())] == list(layout.LAYOUT_GATES)
     finally:
         window.close()
+
+
+def test_an_audio_file_is_sent_only_when_chosen_and_only_for_video(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    """P14: no file, no option -- a run without audio is the argv it has always been --
+    and frame mode greys the row out, because the CLI refuses `--audio` with PNGs."""
+    _source(tmp_path / "src")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "src"))
+        window.discover()
+        window.video_radio.setChecked(True)
+        assert window.audio_edit.text() == "" and window.audio_edit.isEnabled()
+        argv = window.build_command()
+        assert argv is not None and not any(arg.startswith("--audio") for arg in argv)
+
+        chosen = str(tmp_path / "music.wav")
+        window.audio_edit.setText(chosen)
+        argv = window.build_command()
+        assert argv is not None and argv[argv.index("--audio") + 1] == chosen
+        assert not any(arg.startswith("--audio-") for arg in argv), "the format is the default"
+
+        window.frames_radio.setChecked(True)
+        assert not window.audio_edit.isEnabled() and not window.browse_audio.isEnabled()
+        argv = window.build_command()
+        assert argv is not None and "--audio" not in argv
+
+        window.video_radio.setChecked(True)
+        window.clear_audio.click()
+        assert window.audio_edit.text() == ""
+    finally:
+        window.close()
+
+
+def test_the_audio_picker_offers_the_library_s_extensions(
+    qt_app: QApplication, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    from vr_compose.audio import AUDIO_EXTENSIONS
+
+    asked: list[str] = []
+
+    def pick(_parent: object, _title: str, _start: str, filters: str) -> tuple[str, str]:
+        asked.append(filters)
+        return str(tmp_path / "song.flac"), filters
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", pick)
+    window = ComposeWindow()
+    try:
+        window.choose_audio()
+        assert window.audio_edit.text() == str(tmp_path / "song.flac")
+        assert all(f"*{extension}" in asked[0] for extension in AUDIO_EXTENSIONS)
+        assert "所有文件 (*)" in asked[0], "a video's audio track is accepted too"
+    finally:
+        window.close()
+
+
+def test_the_finish_line_says_what_happened_to_the_audio(qt_app: QApplication) -> None:
+    window = ComposeWindow()
+    try:
+        window._handle_event(
+            {"event": "done", "ok": True, "output": "x.mp4", "size_bytes": 0,
+             "seconds_per_frame": 1.0, "problems": [], "warnings": [],
+             "audio": "a.wav -> AAC-LC 48 kHz stereo 192 kbps; the last 2.00 s cut"}
+        )  # fmt: skip
+        assert "音频：a.wav -> AAC-LC 48 kHz stereo 192 kbps" in window.log_edit.toPlainText()
+    finally:
+        window.close()

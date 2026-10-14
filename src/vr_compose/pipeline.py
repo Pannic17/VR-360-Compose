@@ -44,6 +44,7 @@ from typing import Protocol
 import numpy as np
 import numpy.typing as npt
 
+from vr_compose import audio as audio_mod
 from vr_compose import device as device_mod
 from vr_compose import encode, harmonise, io, layout, memory, verify
 from vr_compose import spherical as spherical_mod
@@ -278,6 +279,12 @@ class SequenceJob:
     the first frame's camera positions before anything is stitched or written, and stop
     if they disagree or cannot be compared (:mod:`vr_compose.layout`). `off`: skip it.
     Independent of `gate`: each switch turns off only its own check (ROADMAP P11)."""
+    audio: audio_mod.AudioSpec | None = None
+    """An audio file to carry in the delivery, or `None` (default) for no audio track.
+
+    Measured against the video before anything is stitched, and added by the join, so the
+    segments stay video-only and resuming does not depend on it (ROADMAP P14,
+    :mod:`vr_compose.audio`)."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -396,6 +403,8 @@ class Summary:
     harmonised: bool = False
     layout_report: layout.LayoutReport | None = None
     """The layout gate's measurement, when it ran (a 15-file rig with the gate on)."""
+    audio: audio_mod.AudioPlan | None = None
+    """How the audio file was fitted to the video, when one was given (ROADMAP P14)."""
 
     @property
     def seconds_per_frame(self) -> float:
@@ -652,6 +661,11 @@ def run_sequence(
     say = log or (lambda _: None)
     tools = encode.find_tools()
     tools.require("libx264" if job.spec.codec == "h264" else "libx265")
+    audio_plan: audio_mod.AudioPlan | None = None
+    if job.audio is not None:
+        tools.require("aac")
+        audio_plan = audio_mod.plan(tools, job.audio, len(job.frames), job.spec.fps)
+        say(f"audio: {audio_plan.describe()}")
     _check_disk(job)
 
     tile_size = job.source.tile_size
@@ -774,7 +788,7 @@ def run_sequence(
             say(f"segment {seg_index + 1}/{len(segments)} closed -- {stages.report()}")
 
     say(f"joining {len(finished_paths)} segment(s) ...")
-    encode.concat(tools, finished_paths, job.output)
+    encode.concat(tools, finished_paths, job.output, audio_plan)
     metadata_failure: str | None = None
     if job.spherical is not None:
         try:
@@ -789,7 +803,9 @@ def run_sequence(
             metadata_failure = f"spherical metadata not written ({exc}); try `metadata --write`"
             say(f"WARNING: {metadata_failure}")
     stream = encode.probe(tools, job.output)
-    problems = list(stream.conformance_problems(job.spec, spherical=job.spherical is not None))
+    problems = list(
+        stream.conformance_problems(job.spec, spherical=job.spherical is not None, audio=job.audio)
+    )
     if metadata_failure:
         problems.append(metadata_failure)
     if stream.frames != total:
@@ -824,6 +840,7 @@ def run_sequence(
         device_detail=placement.detail,
         harmonised=harmoniser is not None,
         layout_report=layout_report,
+        audio=audio_plan,
     )
 
 

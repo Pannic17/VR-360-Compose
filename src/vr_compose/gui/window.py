@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from vr_compose import __version__, encode, layout, pipeline
 from vr_compose import source as source_mod
+from vr_compose.audio import AUDIO_EXTENSIONS
 from vr_compose.device import GUI_DEVICE
 from vr_compose.harmonise import DEFAULT_HARMONISE
 from vr_compose.rig import UnknownRigError, rig_for
@@ -158,6 +159,9 @@ class ComposeWindow(QMainWindow):
         self.frames_edit: QLineEdit = self._child(QLineEdit, "framesLineEdit")
         self.output_edit: QLineEdit = self._child(QLineEdit, "outputLineEdit")
         self.browse_output: QPushButton = self._child(QPushButton, "browseOutputButton")
+        self.audio_edit: QLineEdit = self._child(QLineEdit, "audioLineEdit")
+        self.browse_audio: QPushButton = self._child(QPushButton, "browseAudioButton")
+        self.clear_audio: QPushButton = self._child(QPushButton, "clearAudioButton")
         self.video_radio: QRadioButton = self._child(QRadioButton, "videoRadioButton")
         self.frames_radio: QRadioButton = self._child(QRadioButton, "framesRadioButton")
         self.size_combo: QComboBox = self._child(QComboBox, "sizeComboBox")
@@ -180,6 +184,8 @@ class ComposeWindow(QMainWindow):
 
         self.browse_source.clicked.connect(self.choose_source)
         self.browse_output.clicked.connect(self.choose_output)
+        self.browse_audio.clicked.connect(self.choose_audio)
+        self.clear_audio.clicked.connect(self.audio_edit.clear)
         self.discover_button.clicked.connect(self.discover)
         self.start_button.clicked.connect(self.start)
         self.cancel_button.clicked.connect(self.cancel)
@@ -190,6 +196,8 @@ class ComposeWindow(QMainWindow):
         for button, variant in (
             (self.browse_source, "outline"),
             (self.browse_output, "outline"),
+            (self.browse_audio, "outline"),
+            (self.clear_audio, "ghost"),
             (self.discover_button, "outline"),
             (self.cancel_button, "ghost"),
             (self.start_button, "primary"),
@@ -315,13 +323,21 @@ class ComposeWindow(QMainWindow):
     def _mode_changed(self, _checked: bool = False) -> None:
         """Grey out what the chosen mode cannot use, because the CLI refuses it outright.
 
-        Frame mode has no codec, bitrate, frame rate or delivery size -- it writes at the
-        input's own density, losslessly (P5) -- and video mode has no master bit depth.
-        Showing that as disabled controls is friendlier than letting the CLI reject the
-        combination after the fact.
+        Frame mode has no codec, bitrate, frame rate, delivery size or audio track -- it
+        writes PNGs at the input's own density, losslessly (P5) -- and video mode has no
+        master bit depth. Showing that as disabled controls is friendlier than letting the
+        CLI reject the combination after the fact.
         """
         video = self.video_radio.isChecked()
-        for widget in (self.size_combo, self.codec_combo, self.bitrate_combo, self.fps_combo):
+        for widget in (
+            self.size_combo,
+            self.codec_combo,
+            self.bitrate_combo,
+            self.fps_combo,
+            self.audio_edit,
+            self.browse_audio,
+            self.clear_audio,
+        ):
             widget.setEnabled(video)
         self.bit_depth_combo.setEnabled(not video)
 
@@ -342,6 +358,18 @@ class ComposeWindow(QMainWindow):
         picked = QFileDialog.getExistingDirectory(self, "选择输出位置", start)
         if picked:
             self.output_edit.setText(picked)
+
+    @Slot()
+    def choose_audio(self) -> None:
+        """One file; anything ffmpeg decodes is accepted, a video's first audio track too."""
+        current = self.audio_edit.text().strip()
+        start = str(pathlib.Path(current).parent) if current else str(pipeline.default_output_dir())
+        patterns = " ".join(f"*{extension}" for extension in AUDIO_EXTENSIONS)
+        picked, _filter = QFileDialog.getOpenFileName(
+            self, "选择音频文件", start, f"音频 ({patterns});;所有文件 (*)"
+        )
+        if picked:
+            self.audio_edit.setText(picked)
 
     # --- running ----------------------------------------------------------------------
 
@@ -400,6 +428,9 @@ class ComposeWindow(QMainWindow):
                 "--fps",
                 self.fps_combo.currentText(),
             ]
+            # No file, no option: a run without audio is the argv it has always been.
+            if audio := self.audio_edit.text().strip():
+                argv += ["--audio", audio]
         else:
             argv += ["--out-format", "png", "--bit-depth", self.bit_depth_combo.currentText()]
 
@@ -527,6 +558,8 @@ class ComposeWindow(QMainWindow):
         self.log(
             f"完成：{event.get('output')}  ({size:.2f} GiB, {event.get('seconds_per_frame')} s/帧)"
         )
+        if event.get("audio"):
+            self.log(f"  音频：{event['audio']}")
         for problem in event.get("problems", []):
             self.log(f"  合规问题：{problem}")
         for warning in event.get("warnings", []):
@@ -622,6 +655,9 @@ class ComposeWindow(QMainWindow):
                 self.bitrate_combo,
                 self.fps_combo,
                 self.bit_depth_combo,
+                self.audio_edit,
+                self.browse_audio,
+                self.clear_audio,
             ):
                 widget.setEnabled(False)
 

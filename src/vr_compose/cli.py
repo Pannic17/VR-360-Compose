@@ -32,6 +32,7 @@ from collections.abc import Sequence
 from tqdm import tqdm
 
 from vr_compose import __version__, encode, harmonise, io, layout, pipeline, spherical, verify
+from vr_compose import audio as audio_mod
 from vr_compose import device as device_mod
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError, rig_for
@@ -378,8 +379,21 @@ DELIVERY_ONLY = (
     "keep_segments",
     "stitch_at",
     "no_spherical",
+    "audio",
+    "audio_bitrate",
+    "audio_rate",
+    "audio_channels",
 )
 """`sequence` options that only mean something when an encoder is involved."""
+
+AUDIO_FORMAT = ("audio_bitrate", "audio_rate", "audio_channels")
+"""...and the ones that only mean something when there is an audio file to encode."""
+
+AUDIO_HELP = (
+    "add this file's audio (its first track) to the MP4: its first sample on the first "
+    "output frame, cut where the video ends; if it is shorter, silence after it and its "
+    "last second faded out. Default: no audio track"
+)
 
 MASTER_ONLY = ("compress_level", "write_workers", "bit_depth")
 """...and the ones that only mean something when PNG files are."""
@@ -607,6 +621,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     _reject_inapplicable(
         args, MASTER_ONLY, "only apply to --out-format png; an MP4 is not a PNG sequence."
     )
+    if args.audio is None:
+        _reject_inapplicable(args, AUDIO_FORMAT, "only apply with --audio.")
 
     try:
         spec = encode.EncodeSpec.for_size(
@@ -642,6 +658,14 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             harmonise=args.harmonise,
             gate=args.gate,
             layout_gate=args.layout_gate,
+            audio=None
+            if args.audio is None
+            else audio_mod.AudioSpec(
+                args.audio,
+                bitrate_kbps=args.audio_bitrate,
+                sample_rate=args.audio_rate,
+                channels=args.audio_channels,
+            ),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -659,6 +683,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     )
     report.say(f"sampler    : {args.sampler}")
     report.say(f"encode     : {spec.describe()}")
+    if job.audio is not None:
+        report.say(f"audio      : {job.audio.path} -> {job.audio.describe()}")
     report.say(f"output     : {job.output}")
     report.event(
         "start",
@@ -777,6 +803,12 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         f"I-gap={list(stream.i_intervals)} {stream.bitrate_mbps:.1f} Mbps"
     )
     report.say(f"spherical  : {stream.projection or 'absent (--no-spherical)'}")
+    if summary.audio is not None:
+        report.say(
+            f"audio      : {stream.audio_codec} {stream.audio_profile} "
+            f"{stream.audio_sample_rate} Hz {stream.audio_channels} ch "
+            f"{stream.audio_duration:.3f} s -- {summary.audio.describe()}"
+        )
     for warning in summary.warnings:
         report.say(f"WARNING    : {warning}")
     report.event(
@@ -790,6 +822,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         device=summary.device,
         problems=list(summary.problems),
         warnings=list(summary.warnings),
+        audio=summary.audio.describe() if summary.audio is not None else None,
     )
     if summary.problems:
         report.say("CONFORMANCE PROBLEMS:")
@@ -1013,6 +1046,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="leave out the Spherical Video V2 metadata; the file then plays as a flat "
         "2:1 video instead of a 360 panorama (--out-format mp4 only)",
+    )
+    sequence.add_argument("--audio", type=pathlib.Path, default=None, help=AUDIO_HELP)
+    sequence.add_argument(
+        "--audio-bitrate",
+        type=int,
+        default=audio_mod.DEFAULT_AUDIO_BITRATE_KBPS,
+        help="AAC bitrate in kbps (with --audio)",
+    )
+    sequence.add_argument(
+        "--audio-rate",
+        type=int,
+        choices=audio_mod.AUDIO_RATES,
+        default=audio_mod.DEFAULT_AUDIO_RATE,
+        help="audio sample rate in Hz (with --audio)",
+    )
+    sequence.add_argument(
+        "--audio-channels",
+        type=int,
+        choices=audio_mod.AUDIO_CHANNELS,
+        default=audio_mod.DEFAULT_AUDIO_CHANNELS,
+        help="2 (default) or 1; mono is copied to both channels, stereo averaged to one "
+        "(with --audio)",
     )
     sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
     sequence.add_argument("--keep-segments", action="store_true")

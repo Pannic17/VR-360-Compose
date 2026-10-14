@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import functools
 import pathlib
+import subprocess
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 
-from vr_compose import encode
+from vr_compose import audio, encode
 from vr_compose.encode import BITRATES_KBPS, LADDER, SIZES, EncodeSpec
 
 U8 = npt.NDArray[np.uint8]
@@ -157,6 +158,56 @@ def test_a_scene_cut_does_not_move_a_key_frame(tmp_path: pathlib.Path, codec: st
                 writer.write(np.full((32, 64, 3), 240, np.uint8))
     info = encode.probe(TOOLS, path)
     assert info.i_intervals == (spec.gop,), "the cut must not have forced a key frame"
+
+
+AUDIO_CASES = [
+    ("h264", {}),
+    ("h265", {}),
+    ("h264", {"sample_rate": 44_100, "channels": 1, "bitrate_kbps": 128}),
+]
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("codec", "audio_format"), AUDIO_CASES, ids=["h264", "h265", "h264-44k-mono-128"]
+)
+def test_a_delivery_with_audio_is_conformant(
+    tmp_path: pathlib.Path, codec: str, audio_format: dict[str, int]
+) -> None:
+    """ROADMAP P14: the track is added by the join, so it is checked on a joined file.
+
+    Small frames: the audio does not interact with the level, which is what the delivery
+    sizes above are for. Two segments, as the pipeline cuts them, and a source that is
+    longer than the video so the cut is exercised too.
+    """
+    assert TOOLS is not None
+    spec = EncodeSpec(64, 32, codec, 400, 30)
+    segments = []
+    for index in range(2):
+        path = tmp_path / f"seg_{index}.mp4"
+        with encode.SegmentWriter(TOOLS, spec, path) as writer:
+            for i in range(spec.gop):
+                writer.write(_frame_small(index * spec.gop + i))
+        segments.append(path)
+    source = tmp_path / "tone.wav"
+    subprocess.run(
+        [str(TOOLS.ffmpeg), "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+         str(source)],
+        check=True,
+    )  # fmt: skip
+    plan = audio.plan(TOOLS, audio.AudioSpec(source, **audio_format), 2 * spec.gop, spec.fps)
+    joined = encode.concat(TOOLS, segments, tmp_path / "out.mp4", plan)
+
+    info = encode.probe(TOOLS, joined)
+    assert info.conformance_problems(spec, audio=plan.spec) == [], info
+    assert info.frames == 2 * spec.gop and info.i_intervals == (spec.gop,)
+    assert (info.audio_codec, info.audio_profile) == ("aac", "LC")
+    assert info.audio_sample_rate == plan.spec.sample_rate
+    assert info.audio_channels == plan.spec.channels
+
+
+def _frame_small(index: int) -> U8:
+    return np.full((32, 64, 3), (index * 3) % 256, np.uint8)
 
 
 @pytest.mark.parametrize(("size", "codec", "rung", "fps"), MATRIX, ids=MATRIX_IDS)

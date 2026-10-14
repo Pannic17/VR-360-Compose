@@ -137,6 +137,32 @@
             </item>
            </layout>
           </item>
+          <item row="4" column="0">
+           <widget class="QLabel" name="audioLabel">
+            <property name="text"><string>音频</string></property>
+            <property name="toolTip"><string>给视频加一条音轨（只用于视频模式）。音频的第一个采样对齐这次输出的第一帧；比视频长的部分裁掉；比视频短时后面无声，音频的最后 1 秒淡出。编码为 AAC 48 kHz 立体声 192 kbps。留空则不加音轨。</string></property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <layout class="QHBoxLayout" name="audioRowLayout">
+            <property name="spacing"><number>8</number></property>
+            <item>
+             <widget class="QLineEdit" name="audioLineEdit">
+              <property name="placeholderText"><string>留空则不加音轨（仅视频模式）</string></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="browseAudioButton">
+              <property name="text"><string>浏览…</string></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="clearAudioButton">
+              <property name="text"><string>清空</string></property>
+             </widget>
+            </item>
+           </layout>
+          </item>
          </layout>
         </widget>
        </item>

@@ -17,12 +17,14 @@ import signal
 import sys
 import threading
 import types
+import wave
 
 import numpy as np
 import pytest
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
 from vr_compose import encode, pipeline, source, spherical
+from vr_compose.audio import AudioError, AudioSpec
 from vr_compose.encode import EncodeSpec
 from vr_compose.pipeline import GeometryGateFailed, Progress, SequenceJob, parse_frames
 from vr_compose.rig import Rig, View, rig_for, twenty_file_rig
@@ -273,6 +275,72 @@ def test_no_spherical_asks_for_no_metadata_and_that_is_not_a_problem(
     assert summary.problems == (), summary.problems
     assert summary.stream.projection == ""
     assert spherical.read(summary.output) is None
+
+
+def _tone_wav(path: pathlib.Path, seconds: float, frequency: float = 440.0) -> pathlib.Path:
+    rate = 48_000
+    t = np.arange(int(seconds * rate)) / rate
+    pcm = (0.4 * np.sin(2 * np.pi * frequency * t) * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(pcm.tobytes())
+    return path
+
+
+@needs_ffmpeg
+def test_an_audio_file_rides_into_the_delivery(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """ROADMAP P14 end to end: 130 frames are 4.33 s, so 10 s of audio is cut to that,
+    and the 360 metadata and every other conformance field are still in place."""
+    said: list[str] = []
+    job = _job(
+        moving_source,
+        tmp_path / "out.mp4",
+        keep_segments=False,
+        audio=AudioSpec(_tone_wav(tmp_path / "a.wav", 10)),
+    )
+    summary = pipeline.run_sequence(job, log=said.append)
+
+    assert summary.problems == (), summary.problems
+    assert summary.stream.frames == 130 and summary.stream.audio_streams == 1
+    assert (summary.stream.audio_sample_rate, summary.stream.audio_channels) == (48_000, 2)
+    assert summary.stream.projection == "equirectangular"
+    assert summary.audio is not None
+    assert summary.audio.trimmed_samples == 10 * 48_000 - 130 * 1600
+    assert any(line.startswith("audio: a.wav -> AAC-LC 48 kHz stereo 192 kbps") for line in said)
+
+
+@needs_ffmpeg
+def test_a_missing_audio_file_stops_the_run_before_anything_is_stitched(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    job = _job(moving_source, tmp_path / "out.mp4", audio=AudioSpec(tmp_path / "missing.wav"))
+    with pytest.raises(AudioError, match="no such audio file"):
+        pipeline.run_sequence(job)
+    assert not job.segment_dir.exists() and not job.output.exists()
+
+
+@needs_ffmpeg
+def test_a_resumed_run_can_change_the_audio_without_re_encoding(
+    moving_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The segments are video-only, so the audio is the join's business alone."""
+    out = tmp_path / "out.mp4"
+    first = pipeline.run_sequence(
+        _job(moving_source, out, audio=AudioSpec(_tone_wav(tmp_path / "a.wav", 10)))
+    )
+    assert first.problems == () and first.encoded == 130
+
+    again = pipeline.run_sequence(
+        _job(moving_source, out, audio=AudioSpec(_tone_wav(tmp_path / "b.wav", 2, 880.0)))
+    )
+    assert again.encoded == 0 and again.skipped_segments == len(_job(moving_source, out).segments())
+    assert again.problems == (), again.problems
+    assert again.audio is not None and again.audio.fades
+    assert again.stream.audio_duration == pytest.approx(130 / 30, abs=1024 / 48_000)
 
 
 @needs_ffmpeg

@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from vr_compose import encode
+from vr_compose.audio import AudioSpec
 from vr_compose.encode import EncodeSpec, StreamInfo, select_level
 
 
@@ -260,6 +261,48 @@ def test_conformance_names_each_violation(override: dict[str, object], fragment:
     assert len(problems) == 1 and fragment in problems[0], problems
 
 
+AUDIO = AudioSpec(pathlib.Path("a.wav"))
+WITH_AUDIO: dict[str, object] = dict(
+    audio_streams=1, audio_codec="aac", audio_profile="LC", audio_sample_rate=48_000,
+    audio_channels=2, audio_start=0.0, audio_duration=4.0,
+)  # fmt: skip
+"""What a 120-frame, 30 fps delivery with the default audio track probes as."""
+
+
+def test_conformance_passes_a_delivery_with_the_audio_it_asked_for() -> None:
+    spec = EncodeSpec.for_size("8k", "h264", "high", 30)
+    assert _info(**WITH_AUDIO).conformance_problems(spec, audio=AUDIO) == []
+    # the AAC encoder pads its last frame: up to 1024 samples over is still the video's length
+    padded = {**WITH_AUDIO, "audio_duration": 4.0 + 1024 / 48_000}
+    assert _info(**padded).conformance_problems(spec, audio=AUDIO) == []
+
+
+@pytest.mark.parametrize(
+    ("override", "fragment"),
+    [
+        ({"audio_streams": 0}, "0 audio stream(s); expected one"),
+        ({"audio_streams": 2}, "2 audio stream(s); expected one"),
+        ({"audio_codec": "mp3", "audio_profile": ""}, "expected aac LC"),
+        ({"audio_profile": "HE-AAC"}, "expected aac LC"),
+        ({"audio_sample_rate": 44_100}, "sample rate 44100 != 48000"),
+        ({"audio_channels": 1}, "channels 1 != 2"),
+        ({"audio_start": 0.5}, "not on the first frame"),
+        ({"audio_duration": 4.1}, "audio lasts 4.100000 s, the video 4.000000 s"),
+        ({"audio_duration": 2.0}, "audio lasts 2.000000 s"),
+    ],
+)
+def test_conformance_names_each_audio_violation(override: dict[str, object], fragment: str) -> None:
+    spec = EncodeSpec.for_size("8k", "h264", "high", 30)
+    problems = _info(**{**WITH_AUDIO, **override}).conformance_problems(spec, audio=AUDIO)
+    assert len(problems) == 1 and fragment in problems[0], problems
+
+
+def test_an_audio_track_nobody_asked_for_is_still_a_problem() -> None:
+    spec = EncodeSpec.for_size("8k", "h264", "high", 30)
+    problems = _info(**WITH_AUDIO).conformance_problems(spec)
+    assert problems == ["1 audio stream(s); none was asked for"]
+
+
 def test_deterministic_flag_pins_each_encoder_to_its_reproducible_mode() -> None:
     """Measured: x265 needs frame-threads=1:wpp=0; x264 needs threads=1 for short segments."""
     plain_265 = _joined(EncodeSpec(4096, 2048, "h265", 57_000, 30).video_args())
@@ -292,6 +335,7 @@ def test_find_tools_reports_the_required_encoders() -> None:
     assert TOOLS is not None
     assert TOOLS.version.startswith("ffmpeg version")
     TOOLS.require("libx264", "libx265")
+    TOOLS.require("aac")  # audio encoders are listed too, for the optional track (P14)
     with pytest.raises(encode.FfmpegNotFound, match="lacks"):
         TOOLS.require("definitely_not_an_encoder")
 
