@@ -141,7 +141,7 @@ def test_a_fifteen_file_run_with_the_layout_gate_off_says_so(
     src15 = _write(tmp_path, _renumbered(twenty, twenty_file_rig().unique_indices))
     assert _frame(src15, tmp_path / "out.png") == 0
     text = capsys.readouterr().out
-    assert "of3d-15, reading 15 of 15 files" in text
+    assert "pano-15, reading 15 of 15 files" in text
     assert "layout     : layout gate off -- NOT VERIFIED" in text
     assert main(["--source", str(src15), "discover"]) == 0
     assert "the layout gate checks them when a run starts" in capsys.readouterr().out

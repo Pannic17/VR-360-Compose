@@ -137,7 +137,7 @@ def twenty_file_rig() -> Rig:
         yaw = yaw_step * sector
         views += [View(yaw, 45.0), View(yaw, -45.0), View(yaw, 0.0)]
         views.append(View(yaw_step * ((sector + 1) % sectors), 45.0))
-    return Rig(name="of3d-20", views=tuple(views), fov_deg=90.0, mirrored=True)
+    return Rig(name="camera360-20", views=tuple(views), fov_deg=90.0, mirrored=True)
 
 
 def fifteen_file_rig() -> Rig:
@@ -150,7 +150,7 @@ def fifteen_file_rig() -> Rig:
     """
     twenty = twenty_file_rig()
     return Rig(
-        name="of3d-15",
+        name="pano-15",
         views=tuple(twenty.unique_views.values()),
         fov_deg=twenty.fov_deg,
         mirrored=twenty.mirrored,

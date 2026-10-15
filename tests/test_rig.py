@@ -118,8 +118,8 @@ def test_only_the_fifteen_file_layout_needs_a_layout_check() -> None:
 
 
 def test_registry_resolves_the_known_layouts() -> None:
-    assert rig_for(20).name == "of3d-20"
-    assert rig_for(15).name == "of3d-15"
+    assert rig_for(20).name == "camera360-20"
+    assert rig_for(15).name == "pano-15"
     assert set(REGISTRY) == {15, 20}
 
 

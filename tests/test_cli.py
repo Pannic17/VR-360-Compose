@@ -60,7 +60,7 @@ def test_discover_reports_the_set_and_the_rig(
     assert main(["--source", str(tmp_path), "discover"]) == 0
     out = capsys.readouterr().out
     assert "cameras    : 20" in out
-    assert "of3d-20" in out
+    assert "camera360-20" in out
     assert "15 distinct of 20 files" in out
 
 
