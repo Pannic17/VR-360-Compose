@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     frame = args.frame if args.frame is not None else chosen.frames[0]
     a, b = args.pair
 
-    tiles = io.load_tiles(chosen, frame, list(rig.unique_indices), workers=8)
+    tiles = io.uint8_tiles(io.load_tiles(chosen, frame, list(rig.unique_indices), workers=8))
     drawn, seen_a = warp_one(tiles, rig, a, size, args.width)
     _, seen_b = warp_one(tiles, rig, b, size, args.width)
     objects = find_objects(drawn, seen_a & seen_b)

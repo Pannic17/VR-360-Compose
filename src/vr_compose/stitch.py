@@ -22,6 +22,7 @@ identical on the same inputs, which is what the verification metrics are for.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 
 import numpy as np
 import numpy.typing as npt
@@ -33,7 +34,15 @@ F32 = npt.NDArray[np.float32]
 I32 = npt.NDArray[np.int32]
 F64 = npt.NDArray[np.float64]
 U8 = npt.NDArray[np.uint8]
+Tile = npt.NDArray[np.uint8] | npt.NDArray[np.float32]
+"""A source tile's 8-bit levels: uint8 from a PNG, float32 (unquantised) from an EXR.
+
+Both are on the 0..255 scale, so everything that measures in levels -- the gate, the
+harmoniser's clamp, the layout gate's contrast floor -- reads the same. Every sampler
+casts to float32 before arithmetic, so a float tile holding integers blends exactly as
+the uint8 tile of those integers does, and the PNG path is unchanged by the EXR one."""
 Panorama = npt.NDArray[np.uint8] | npt.NDArray[np.uint16]
+TILE_DTYPES = (np.uint8, np.float32)
 
 __all__ = [
     "BIT_DEPTHS",
@@ -41,8 +50,10 @@ __all__ = [
     "DEFAULT_SAMPLER",
     "DEFAULT_SEAM_BAND",
     "SAMPLERS",
+    "TILE_DTYPES",
     "BandStats",
     "StitchResult",
+    "Tile",
     "bilinear_blend",
     "catmull_rom_weights",
     "cubic_blend",
@@ -345,7 +356,7 @@ def _feather(x: F64, y: F64, half: float, power: float = DEFAULT_FEATHER_POWER) 
 
 
 def stitch_bands(
-    tiles: dict[int, U8],
+    tiles: Mapping[int, Tile],
     rig: Rig,
     width: int,
     height: int,
@@ -358,7 +369,7 @@ def stitch_bands(
 ) -> StitchResult:
     """Blend `tiles` into a ``height x width x 3`` panorama, one horizontal band at a time.
 
-    `tiles` maps a 1-based camera index to an ``(n, n, 3)`` uint8 array. Only the rig's
+    `tiles` maps a 1-based camera index to an ``(n, n, 3)`` :data:`Tile`. Only the rig's
     unique indices are required; extra entries are ignored, so a caller may hand over all
     20 files or just the 15 distinct ones.
 
@@ -390,6 +401,8 @@ def stitch_bands(
         tile = tiles[index]
         if tile.ndim != 3 or tile.shape[0] != tile.shape[1] or tile.shape[2] != 3:
             raise ValueError(f"camera {index}: expected a square RGB tile, got {tile.shape}")
+        if tile.dtype not in TILE_DTYPES:
+            raise ValueError(f"camera {index}: tiles are uint8 or float32, got {tile.dtype}")
 
     half = projection.half_extent(rig.fov_deg)
     image: Panorama = np.empty((height, width, 3), np.uint8 if bit_depth == 8 else np.uint16)
@@ -447,7 +460,7 @@ def stitch_bands(
                 )
 
                 def tap_row(
-                    dy: int, tile: U8 = tile, row: I32 = row, column: I32 = column
+                    dy: int, tile: Tile = tile, row: I32 = row, column: I32 = column
                 ) -> tuple[F32, F32, F32, F32]:
                     return (
                         tile[row + dy, column].astype(np.float32),
@@ -474,7 +487,7 @@ def stitch_bands(
 
 
 def stitch_frame(
-    tiles: dict[int, U8],
+    tiles: Mapping[int, Tile],
     rig: Rig,
     width: int,
     *,

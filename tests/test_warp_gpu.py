@@ -77,6 +77,33 @@ def test_gpu_matches_the_per_frame_stitch(
 
 
 @needs_gpu
+@pytest.mark.parametrize("bit_depth", list(BIT_DEPTHS))
+def test_gpu_matches_the_cpu_plan_on_float_tiles(
+    plans: tuple[WarpPlan, GpuWarpPlan], tiles: dict[int, U8], bit_depth: int
+) -> None:
+    """EXR tiles take the float-source kernel; after the load the arithmetic is the same
+    (P15). Switching back to uint8 on the same plan re-types the buffers."""
+    plan, gpu = plans
+    rng = np.random.default_rng(3)
+    floats = {
+        camera: np.asarray(
+            np.clip(tile + rng.uniform(-0.49, 0.49, tile.shape), 0.0, 255.0), dtype=np.float32
+        )
+        for camera, tile in tiles.items()
+    }
+    expected = plan.apply(floats, with_stats=True, bit_depth=bit_depth)
+    got = gpu.apply(floats, with_stats=True, bit_depth=bit_depth)
+    assert np.array_equal(got.image, expected.image), (
+        f"{plan.sampler} {bit_depth}-bit: {np.count_nonzero(got.image != expected.image)} differ"
+    )
+    assert np.array_equal(got.stats.luma_sum, expected.stats.luma_sum)
+    assert np.array_equal(got.stats.luma_sq_sum, expected.stats.luma_sq_sum)
+    assert np.array_equal(
+        gpu.apply(tiles, bit_depth=bit_depth).image, plan.apply(tiles, bit_depth=bit_depth).image
+    )
+
+
+@needs_gpu
 def test_a_second_frame_reuses_the_device_buffers(
     plans: tuple[WarpPlan, GpuWarpPlan], tiles: dict[int, U8]
 ) -> None:

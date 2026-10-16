@@ -1,8 +1,9 @@
-"""Sequence jobs: decode -> warp -> sink, resumable. One MP4 out, or PNG masters.
+"""Sequence jobs: decode -> warp -> sink, resumable. One MP4 out, or masters.
 
 Two sinks share one core. :func:`run_sequence` is the delivery path -- straight into
-ffmpeg, no intermediate file. :func:`run_master` is the archival one, a lossless PNG per
-frame, which P4 needs to compare quality against. Both get their frames from
+ffmpeg, no intermediate file. :func:`run_master` is the archival one, a lossless PNG (or,
+from an EXR source, a linear half-float EXR) per frame, which P4 needs to compare quality
+against. Both get their frames from
 :func:`_prefetch_tiles` and :func:`_stitch_one`, so the geometry, the decode overlap and
 the sampled gate are the same code in both.
 
@@ -38,7 +39,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Protocol
 
 import numpy as np
@@ -46,7 +47,7 @@ import numpy.typing as npt
 
 from vr_compose import audio as audio_mod
 from vr_compose import device as device_mod
-from vr_compose import encode, harmonise, io, layout, memory, verify
+from vr_compose import encode, exr, harmonise, io, layout, memory, verify
 from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
@@ -56,12 +57,14 @@ from vr_compose.stitch import (
     DEFAULT_SAMPLER,
     DEFAULT_SEAM_BAND,
     StitchResult,
+    Tile,
 )
 from vr_compose.warp import DEFAULT_THREADS, WarpPlan
 
 U8 = npt.NDArray[np.uint8]
 
 __all__ = [
+    "MASTER_FORMATS",
     "Cancelled",
     "GeometryGateFailed",
     "MasterJob",
@@ -456,7 +459,7 @@ class Warper(Protocol):
 
     def apply(
         self,
-        tiles: dict[int, U8],
+        tiles: Mapping[int, Tile],
         *,
         with_stats: bool,
         threads: int,
@@ -529,7 +532,7 @@ def _place_plan(
 
 def _stitch_one(
     plan: Warper,
-    tiles: dict[int, U8],
+    tiles: Mapping[int, Tile],
     *,
     threads: int,
     gate: bool,
@@ -550,7 +553,7 @@ def _stitch_one(
     return result.image, report, warped - started, time.time() - warped
 
 
-Prepared = tuple[dict[int, U8], "harmonise.Corrections | None", float]
+Prepared = tuple[Mapping[int, Tile], "harmonise.Corrections | None", float]
 """What the prefetch thread hands over: tiles, their corrections (or None), estimate seconds."""
 
 
@@ -957,10 +960,22 @@ Each figure carries headroom over the measurement so a busier frame cannot make 
 precheck under-reserve. A 778-frame 8K master set is about 30 GiB at 8 bits and
 **101 GiB at 16** -- which is the number worth knowing before starting one."""
 
+MASTER_FORMATS = ("png", "exr")
+"""What a master is written as: a lossless PNG, or the 16-bit stitch as a linear
+half-float EXR, from an EXR source only (ROADMAP P15 step 3)."""
+
+EXR_MASTER_BYTES_PER_PIXEL = 3.5
+"""For the disk precheck of an EXR master, with headroom over the measurement.
+
+Raw half RGB is 6 bytes a pixel; ZIP at zlib level 1 on the real 8K masters of `_Demo`
+(frames 571-572) measures 2.83 (79.6 MiB a frame; 2.68 at level 6), less than the 16-bit
+PNG's 4.33 -- half's low bits deflate better than 16-bit levels' low bytes do. Level 0
+stores every chunk raw, so the estimate uses 6 there."""
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class MasterJob:
-    """Render `frames` as a lossless PNG sequence into `directory`."""
+    """Render `frames` as a lossless PNG or EXR sequence into `directory`."""
 
     source: SourceSet
     rig: Rig
@@ -988,7 +1003,9 @@ class MasterJob:
 
     1 by default: it costs 0.68 s a frame against 6's 2.77 s for about 10% more bytes
     (AGENTS.md section 8), and a master is an intermediate, so time is worth more than
-    the bytes. Pass 0 for literally uncompressed files, at roughly 2.3x the disk."""
+    the bytes. Pass 0 for literally uncompressed files, at roughly 2.3x the disk.
+
+    For an EXR master it is the zlib level of the ZIP chunks, with the same promise."""
     decode_workers: int | None = None
     """As :attr:`SequenceJob.decode_workers`: `None` picks the device's default."""
     warp_threads: int = DEFAULT_THREADS
@@ -1028,10 +1045,29 @@ class MasterJob:
     """As :attr:`SequenceJob.gate`."""
     layout_gate: str = layout.DEFAULT_LAYOUT_GATE
     """As :attr:`SequenceJob.layout_gate`."""
+    out_format: str = "png"
+    """One of :data:`MASTER_FORMATS`. `exr` writes the 16-bit stitch decoded back to
+    display-referred linear, as half (:func:`vr_compose.exr.half_from_levels16`), so it
+    needs `bit_depth` 16 -- and an EXR source: an 8-bit PNG source holds nothing a
+    16-bit PNG master does not keep, and the refusal says so."""
 
     def __post_init__(self) -> None:
         if not self.frames:
             raise ValueError("no frames to process")
+        if self.out_format not in MASTER_FORMATS:
+            raise ValueError(f"out_format must be one of {MASTER_FORMATS}, got {self.out_format!r}")
+        if self.out_format == "exr":
+            if self.source.tile_format != "exr":
+                raise ValueError(
+                    "an EXR master is written from an EXR source only; this source is "
+                    f"{self.source.tile_format or 'mixed'}. An 8-bit source holds nothing "
+                    "a 16-bit PNG master does not keep: use --out-format png --bit-depth 16."
+                )
+            if self.bit_depth != 16:
+                raise ValueError(
+                    "an EXR master is the 16-bit stitch in half-float; "
+                    f"got bit_depth {self.bit_depth}"
+                )
         if self.device not in device_mod.DEVICES:
             raise ValueError(f"device must be one of {device_mod.DEVICES}, got {self.device!r}")
         if self.gate not in GATES:
@@ -1063,12 +1099,13 @@ class MasterJob:
         return self.width // 2
 
     def frame_path(self, frame: int) -> pathlib.Path:
-        """`<stem>_S_<frame>.png`, the naming the user asked for in P5.
+        """`<stem>_S_<frame>.png` (or `.exr`), the naming the user asked for in P5.
 
         The frame number keeps the source's own zero padding, so a directory listing
         sorts the way the source does -- unpadded, `999` would sort after `1000`.
         """
-        return self.directory / f"{self.source.stem}_S_{frame:0{self.source.frame_digits}d}.png"
+        name = f"{self.source.stem}_S_{frame:0{self.source.frame_digits}d}.{self.out_format}"
+        return self.directory / name
 
     def pending_frames(self) -> tuple[int, ...]:
         """Frames still to render. Consulted *before* decoding, not after."""
@@ -1078,7 +1115,10 @@ class MasterJob:
 
     def estimated_bytes(self, frames: int | None = None) -> int:
         count = len(self.frames) if frames is None else frames
-        rate = MASTER_BYTES_PER_PIXEL[self.bit_depth]
+        if self.out_format == "exr":
+            rate = 6.0 if self.compress_level == 0 else EXR_MASTER_BYTES_PER_PIXEL
+        else:
+            rate = MASTER_BYTES_PER_PIXEL[self.bit_depth]
         return int(count * self.width * self.height * rate)
 
 
@@ -1117,7 +1157,7 @@ def run_master(
     plan: WarpPlan | None = None,
     cancel: threading.Event | None = None,
 ) -> MasterSummary:
-    """Render the job's frames as PNG masters. Cancellable and resumable per frame."""
+    """Render the job's frames as masters. Cancellable and resumable per frame."""
     say = log or (lambda _: None)
     tile_size = job.source.tile_size
     if tile_size is None:
@@ -1178,9 +1218,11 @@ def run_master(
     prepare = _preparer(job.source, indices, decode_workers, harmoniser)
 
     def write_one(frame: int, image: io.Panorama) -> int:
-        return io.write_png_atomically(
-            job.frame_path(frame), image, compress_level=job.compress_level
-        )
+        path = job.frame_path(frame)
+        if job.out_format == "exr":
+            half = exr.half_from_levels16(np.asarray(image, np.uint16))
+            return io.write_exr_atomically(path, half, compress_level=job.compress_level)
+        return io.write_png_atomically(path, image, compress_level=job.compress_level)
 
     stop = cancel if cancel is not None else threading.Event()
     flight: collections.deque[concurrent.futures.Future[int]] = collections.deque()

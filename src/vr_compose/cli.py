@@ -126,8 +126,9 @@ def _resolve_source(explicit: pathlib.Path | None) -> source_mod.SourceSet:
                 for problem in candidate.problems:
                     print(f"  - {problem}", file=sys.stderr)
         print(
-            "\nA source directory needs at least two `CameraN` directories whose PNGs are\n"
-            "named `<stem>.<frame>.png`, either directly inside or one level below.",
+            "\nA source directory needs at least two `CameraN` directories whose tiles are\n"
+            "named `<stem>.<frame>.png` or `.exr`, either directly inside or one level\n"
+            "below; one directory holds one format.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -396,7 +397,7 @@ AUDIO_HELP = (
 )
 
 MASTER_ONLY = ("compress_level", "write_workers", "bit_depth")
-"""...and the ones that only mean something when PNG files are."""
+"""...and the ones that only mean something when master files are."""
 
 
 def _reject_inapplicable(args: argparse.Namespace, names: tuple[str, ...], why: str) -> None:
@@ -418,18 +419,27 @@ def cmd_master(
     frames: list[int],
     stamp: str,
 ) -> int:
-    """`sequence --out-format png`: a lossless PNG master per frame.
+    """`sequence --out-format png` or `exr`: a lossless master per frame.
 
     Masters are always at the source's native density -- the sampling density the tiles
     were rendered at, `Rig.native_width` -- because a master is the thing other sizes are
     derived *from*. For a one-off at some other width, `frame --width` is the command.
+    An EXR master is the 16-bit stitch written as linear half-float, so `--bit-depth` has
+    nothing to choose there and is refused rather than ignored.
     """
     _reject_inapplicable(
         args,
         DELIVERY_ONLY,
-        "only apply to --out-format mp4. A PNG master has no codec, bitrate, frame rate "
+        "only apply to --out-format mp4. A master has no codec, bitrate, frame rate "
         "or delivery size to choose: it is the source's own density, losslessly.",
     )
+    if args.out_format == "exr":
+        _reject_inapplicable(
+            args,
+            ("bit_depth",),
+            "only applies to --out-format png; an EXR master is always the 16-bit stitch, "
+            "written as linear half-float.",
+        )
     tile = chosen.tile_size
     if tile is None:
         raise SystemExit("source tiles are not square or not uniform; cannot stitch")
@@ -449,7 +459,7 @@ def cmd_master(
             sampler=args.sampler,
             feather_power=args.feather_power,
             seam_band=args.seam_band,
-            bit_depth=args.bit_depth,
+            bit_depth=16 if args.out_format == "exr" else args.bit_depth,
             write_workers=args.write_workers,
             stats_every=args.stats_every,
             resume=not args.no_resume,
@@ -457,11 +467,13 @@ def cmd_master(
             harmonise=args.harmonise,
             gate=args.gate,
             layout_gate=args.layout_gate,
+            out_format=args.out_format,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
     pending = job.pending_frames()
+    kind = "linear half-float EXR" if job.out_format == "exr" else f"{job.bit_depth}-bit PNG"
     report = Reporter(json=args.progress_json)
     report.say(f"source     : {chosen.root}  stem {chosen.stem!r}")
     report.say(
@@ -471,7 +483,7 @@ def cmd_master(
         report.say(note)
     report.say(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
     report.say(
-        f"master     : {width}x{width // 2} {job.bit_depth}-bit PNG at the input's own "
+        f"master     : {width}x{width // 2} {kind} at the input's own "
         f"density, lossless (zlib {job.compress_level}), sampler {job.sampler}"
     )
     report.say(f"output     : {job.directory}")
@@ -483,7 +495,7 @@ def cmd_master(
         first=frames[0],
         last=frames[-1],
         output=str(job.directory),
-        describe=f"{width}x{width // 2} {job.bit_depth}-bit PNG, lossless",
+        describe=f"{width}x{width // 2} {kind}, lossless",
         sampler=job.sampler,
         baseline_seconds_per_frame=pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME,
     )
@@ -609,17 +621,10 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     # One stamp for the whole run: it names the output *and*, for the MP4 path, the
     # segment directory derived from it, so a second reading could split a job in two.
     stamp = pipeline.run_stamp()
-    if args.out_format == "exr":
-        raise SystemExit(
-            "EXR masters are not implemented: the source is 8-bit PNG, so an EXR would "
-            "carry no more information than the PNG master does. The interface is "
-            "reserved for a 16-bit source, which needs a change upstream that is not "
-            "available (UPSTREAM.md, item 3). Use --out-format png."
-        )
-    if args.out_format == "png":
+    if args.out_format != "mp4":
         return cmd_master(args, chosen, rig, frames, stamp)
     _reject_inapplicable(
-        args, MASTER_ONLY, "only apply to --out-format png; an MP4 is not a PNG sequence."
+        args, MASTER_ONLY, "only apply to --out-format png/exr; an MP4 is not a frame sequence."
     )
     if args.audio is None:
         _reject_inapplicable(args, AUDIO_FORMAT, "only apply with --audio.")
@@ -951,7 +956,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("mp4", "png", "exr"),
         default="mp4",
         help="'mp4' (default) is the delivery path; 'png' writes a lossless master per "
-        "frame at the source's native density, for quality work and archiving",
+        "frame at the source's native density, for quality work and archiving; 'exr' "
+        "writes that master as linear half-float instead, from an EXR source only",
     )
     sequence.add_argument("--size", choices=list(encode.SIZES), default="8k")
     sequence.add_argument("--codec", choices=["h264", "h265"], default="h264")
@@ -1076,8 +1082,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         choices=range(10),
-        help="PNG master zlib level; 1 costs 0.68 s a frame against 6's 2.77 s for ~10%% "
-        "more bytes. The pixels are identical either way (--out-format png only)",
+        help="master zlib level, for the PNG or for the EXR's ZIP chunks; 1 costs 0.68 s a "
+        "frame against 6's 2.77 s for ~10%% more bytes (PNG). The pixels are identical "
+        "either way (--out-format png/exr only)",
     )
     sequence.add_argument(
         "--bit-depth",
@@ -1085,13 +1092,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         choices=list(BIT_DEPTHS),
         help="PNG master depth; 16 keeps the resample's sub-level precision, which 8-bit "
-        "quantisation throws away (--out-format png only)",
+        "quantisation throws away (--out-format png only; an EXR master is always the "
+        "16-bit stitch)",
     )
     sequence.add_argument(
         "--write-workers",
         type=int,
         default=None,
-        help="PNG encodes in flight (--out-format png only). Default: 1 on the CPU (a "
+        help="master encodes in flight (--out-format png/exr only). Default: 1 on the CPU (a "
         "second worker slows the warp), 4 on the GPU (there the PNG encode is the "
         "bottleneck: 8-bit 1.26 -> 0.51 s/frame)",
     )

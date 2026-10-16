@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from collections.abc import Mapping
 
 import numpy as np
 import numpy.typing as npt
@@ -43,6 +44,7 @@ from vr_compose.stitch import (
     _EPSILON,
     DEFAULT_FEATHER_POWER,
     BandStats,
+    Tile,
     bilinear_blend,
     luma_bt709,
 )
@@ -61,7 +63,6 @@ __all__ = [
 
 F32 = npt.NDArray[np.float32]
 F64 = npt.NDArray[np.float64]
-U8 = npt.NDArray[np.uint8]
 
 DEFAULT_HARMONISE = True
 
@@ -146,7 +147,12 @@ class Harmoniser:
         # The estimate measures the cameras' disagreement over the whole overlap, so every
         # tile keeps its say here whatever seam band the picture is blended with.
         self.plan = WarpPlan.build(
-            rig, width, width // 2, tile_size, sampler="bilinear", feather_power=feather_power,
+            rig,
+            width,
+            width // 2,
+            tile_size,
+            sampler="bilinear",
+            feather_power=feather_power,
             seam_band=1.0,
         )
         self.grid = grid
@@ -186,7 +192,7 @@ class Harmoniser:
     def build_seconds(self) -> float:
         return self.plan.build_seconds
 
-    def estimate(self, tiles: dict[int, U8]) -> Corrections:
+    def estimate(self, tiles: Mapping[int, Tile]) -> Corrections:
         """The corrections for one frame's tiles."""
         started = time.perf_counter()
         plan = self.plan

@@ -51,7 +51,7 @@ from vr_compose.stitch import (
 from vr_compose.warp import WarpPlan, plan_fingerprint
 
 try:
-    import cupy as cp
+    import cupy as cp  # type: ignore[import-untyped,unused-ignore]
 except ImportError:  # pragma: no cover - the whole point of the probe is to have it
     print("cupy is not installed: pip install cupy-cuda12x", file=sys.stderr)
     raise SystemExit(2) from None
@@ -310,7 +310,7 @@ class GpuPlan:
 
     def download(self, bit_depth: int) -> np.ndarray:
         out = self.out8 if bit_depth == 8 else self.out16
-        return cp.asnumpy(out).reshape(self.plan.height, self.plan.width, 3)
+        return np.asarray(cp.asnumpy(out)).reshape(self.plan.height, self.plan.width, 3)
 
     def stats(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return cp.asnumpy(self.count), cp.asnumpy(self.luma_sum), cp.asnumpy(self.luma_sq_sum)
@@ -441,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         cpu_seconds = float("nan")
         ok = True
         for frame_no, frame in enumerate(frames):
-            tiles = io.load_tiles(chosen, frame, indices, workers=8)
+            tiles = io.uint8_tiles(io.load_tiles(chosen, frame, indices, workers=8))
             # -- CPU reference (with stats so the gate arithmetic is compared too) --
             started = time.perf_counter()
             ref8: StitchResult = plan.apply(

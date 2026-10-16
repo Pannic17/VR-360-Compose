@@ -30,6 +30,7 @@ import hashlib
 import json
 import pathlib
 import time
+from collections.abc import Mapping
 
 import numpy as np
 import numpy.typing as npt
@@ -44,9 +45,11 @@ from vr_compose.stitch import (
     DEFAULT_SAMPLER,
     DEFAULT_SEAM_BAND,
     SAMPLERS,
+    TILE_DTYPES,
     BandStats,
     Panorama,
     StitchResult,
+    Tile,
     _feather,
     bilinear_blend,
     cubic_blend,
@@ -57,7 +60,6 @@ from vr_compose.stitch import (
 
 F32 = npt.NDArray[np.float32]
 I32 = npt.NDArray[np.int32]
-U8 = npt.NDArray[np.uint8]
 
 __all__ = ["PLAN_FORMAT", "TileContributors", "WarpPlan", "plan_fingerprint", "upsample_grid"]
 
@@ -250,7 +252,7 @@ class WarpPlan:
         # consumer -- CPU, CUDA, a cached plan on disk -- stays none the wiser.
         weights = narrow_to_band(
             places,  # type: ignore[arg-type]
-            [joined(parts, 2, np.float32) for parts in chunks.values()],  # type: ignore[list-item]
+            [joined(parts, 2, np.float32) for parts in chunks.values()],  # type: ignore[misc]
             width * height,
             seam_band,
         )
@@ -279,7 +281,7 @@ class WarpPlan:
             seam_band=seam_band,
         )
 
-    def _validate(self, tiles: dict[int, U8]) -> None:
+    def _validate(self, tiles: Mapping[int, Tile]) -> None:
         for tile in self.tiles:
             try:
                 source = tiles[tile.camera]
@@ -290,10 +292,14 @@ class WarpPlan:
                     f"camera {tile.camera}: expected ({self.tile_size}, {self.tile_size}, 3), "
                     f"got {source.shape}"
                 )
+            if source.dtype not in TILE_DTYPES:
+                raise ValueError(
+                    f"camera {tile.camera}: tiles are uint8 or float32, got {source.dtype}"
+                )
 
     def apply(
         self,
-        tiles: dict[int, U8],
+        tiles: Mapping[int, Tile],
         *,
         with_stats: bool = False,
         threads: int = DEFAULT_THREADS,
@@ -365,7 +371,7 @@ class WarpPlan:
                         offset: int,
                         base: I32 = src_index,
                         step: int = step,
-                        source: U8 = source,
+                        source: Tile = source,
                     ) -> tuple[F32, F32, F32, F32]:
                         start_of_row = base + offset * step
                         return (

@@ -208,6 +208,59 @@ def test_sixteen_bit_matches_the_stitch_and_the_eight_bit_output(
     assert np.abs(deep.astype(np.int64) // 257 - shallow.astype(np.int64)).max() <= 1
 
 
+F32 = npt.NDArray[np.float32]
+
+
+def _float_tiles(tiles: dict[int, U8]) -> dict[int, F32]:
+    """EXR-like tiles: the uint8 levels plus a deterministic sub-level offset."""
+    rng = np.random.default_rng(7)
+    return {
+        camera: np.asarray(
+            np.clip(tile + rng.uniform(-0.49, 0.49, tile.shape), 0.0, 255.0), dtype=np.float32
+        )
+        for camera, tile in tiles.items()
+    }
+
+
+@pytest.mark.parametrize("sampler", list(SAMPLERS))
+@pytest.mark.parametrize("bit_depth", [8, 16])
+def test_float_tiles_match_the_stitch_byte_for_byte(
+    rig: Rig, tiles: dict[int, U8], sampler: str, bit_depth: int
+) -> None:
+    """Metric D on EXR-style tiles: plan and stitch take the same float path (P15)."""
+    floats = _float_tiles(tiles)
+    plan = WarpPlan.build(rig, WIDTH, WIDTH // 2, TILE, sampler=sampler)
+    expected = stitch_frame(floats, rig, WIDTH, sampler=sampler, bit_depth=bit_depth)
+    got = plan.apply(floats, with_stats=True, bit_depth=bit_depth)
+    assert np.array_equal(got.image, expected.image)
+    assert np.array_equal(got.stats.luma_sum, expected.stats.luma_sum)
+
+
+def test_a_float_tile_of_integer_levels_is_the_uint8_tile(
+    rig: Rig, tiles: dict[int, U8], plan: WarpPlan
+) -> None:
+    """The samplers cast to float32 first, so the PNG path is untouched by the EXR one;
+    and the sub-level part a float tile carries does reach the 16-bit master."""
+    as_float = {camera: tile.astype(np.float32) for camera, tile in tiles.items()}
+    for bit_depth in (8, 16):
+        assert np.array_equal(
+            plan.apply(as_float, bit_depth=bit_depth).image,
+            plan.apply(tiles, bit_depth=bit_depth).image,
+        )
+    floats = _float_tiles(tiles)
+    assert not np.array_equal(
+        plan.apply(floats, bit_depth=16).image, plan.apply(tiles, bit_depth=16).image
+    )
+
+
+def test_other_tile_dtypes_are_refused(rig: Rig, tiles: dict[int, U8], plan: WarpPlan) -> None:
+    wrong = {camera: tile.astype(np.float64) for camera, tile in tiles.items()}
+    with pytest.raises(ValueError, match="uint8 or float32"):
+        plan.apply(wrong)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="uint8 or float32"):
+        stitch_frame(wrong, rig, WIDTH)  # type: ignore[arg-type]
+
+
 def test_the_feather_power_default_is_byte_identical(rig: Rig, tiles: dict[int, U8]) -> None:
     """The exponent is new; its default must not have moved a single pixel."""
     explicit = stitch_frame(tiles, rig, WIDTH, feather_power=2.0).image

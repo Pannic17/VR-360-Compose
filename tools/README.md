@@ -28,6 +28,7 @@
 | `blend_probe.py` | §3「分频混合」—— 在重叠区找孤立小物体，量每种混合方式保住了多少对比度（默认 / 羽化 8 / `--two-band`）；100% 是画出它的那台相机 | 约 2 分钟 |
 | `correspondence_probe.py` | P13 / §3「会动的东西」—— 同一帧的各相机是否共享一个动画状态：在 A 的重叠区找从 t−1 跟踪到 t 的运动物体，到 B 里按 NCC 找对应，报三组数：r 度内有对应的比例（0.25 / 0.5 / 1 / 2.8°）、减掉静态偏移后的残余位移（中位 / p90，按物体自身运动分解成沿向 / 垂直向，单位帧）、A(t) 对 B(t−1 / t / t+1) 的帧偏移对照。默认 15 对（水平环 5 对 + 布局门 10 对），`--pair A B` 单独指定，`--out-dir` 存没找到的物体的左右裁图。合成标定在 `tests/test_correspondence_probe.py` | 15 对每帧约 1–3 分钟 |
 | `gpu_probe.py` | §8「GPU 加速」—— 8K warp 在 GPU 上的上传/核函数/下载毫秒数，以及与 CPU 路径的**逐字节比对**（图像 8/16 位 + 几何门统计）；`--frames` 多帧即指标 D。需要 `pip install -e .[gpu]` | 单帧约 2 分钟（含建 3 张 LUT），`--work` 缓存后约 1 分钟 |
+| `exr_probe.py` | P15 / §10「EXR 源」—— `check`：读取器对 ffmpeg 逐位比对 + 解码耗时；`tiles`：两份采集逐 tile 的偏差（按级分箱，把量化误差和内容漂移分开）；`stitch`：两份采集各拼一次比全景，含「同内容对照」（EXR 的浮点级值 vs 加无偏抖动量化成 8 bit 的同一张图）。两份采集 PNG / EXR 任意搭配；`master`：一个 `--out-format exr` 母版目录逐文件对 ffmpeg 解码器比 half 位、报每像素字节数，给了 `--png16`（同一次拼接的 16-bit PNG 母版目录）再验「EXR 母版 = PNG 母版的码查表」并报解码回级值的差 | `check` 约 30 s；`tiles` 1920 每对 10 帧约 1 分钟；`stitch` 8K 每帧 CPU 约 4 分钟、`--device cuda` 约 1 分钟；`master` 8K 每帧约 5 s |
 | `package_probe.py` | §7 打包体积/启动时间、冻结后进程池（**探针**，用合成小程序） | 每种配置约 90 s 构建 |
 | `build_exe.py` | P8 **真正的发布构建**：PyInstaller + 放入 ffmpeg + 中文说明（md 与 pdf）+ 冒烟校验；`--onefile` 出单文件 | 约 2 / 5 分钟 |
 | `manual_pdf.py` | 把 `docs/使用说明.md` 排版成 PDF（Edge/Chrome 无头打印） | 数秒 |

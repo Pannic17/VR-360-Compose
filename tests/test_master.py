@@ -1,4 +1,4 @@
-"""The PNG master sink: lossless frames at the source's native density.
+"""The PNG and EXR master sinks: lossless frames at the source's native density.
 
 The property that matters most is the one tying it to the rest of the system: a master
 must be the *same pixels* the delivery path stitches and the `frame` command prints
@@ -9,6 +9,7 @@ discipline the MP4 segments follow, restated one file at a time.
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import threading
 import types
 
@@ -17,7 +18,7 @@ import pytest
 from PIL import Image
 
 from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
-from vr_compose import io, pipeline, source
+from vr_compose import encode, exr, io, pipeline, source
 from vr_compose.rig import rig_for, twenty_file_rig
 from vr_compose.stitch import stitch_frame
 from vr_compose.warp import WarpPlan
@@ -39,6 +40,24 @@ def still_source(tmp_path_factory: pytest.TempPathFactory) -> source.SourceSet:
         frames=FRAMES,
         size=(TILE, TILE),
         tile_for=lambda camera, _frame: sample_panorama_into_tile(panorama, rig, camera, TILE),
+    )
+    return source.scan(root)[0]
+
+
+@pytest.fixture(scope="module")
+def exr_source(tmp_path_factory: pytest.TempPathFactory) -> source.SourceSet:
+    """The same picture as `still_source`, written as linear half EXR tiles (P15)."""
+    rig = twenty_file_rig()
+    panorama = analytic_panorama(NATIVE, NATIVE // 2)
+    root = tmp_path_factory.mktemp("exr_masters")
+    make_source_tree(
+        root,
+        cameras=20,
+        stem="S",
+        frames=FRAMES,
+        size=(TILE, TILE),
+        tile_for=lambda camera, _frame: sample_panorama_into_tile(panorama, rig, camera, TILE),
+        tile_format="exr",
     )
     return source.scan(root)[0]
 
@@ -318,6 +337,52 @@ def test_cuda_masters_are_the_cpu_masters_byte_for_byte(
         assert (tmp_path / "cuda" / name).read_bytes() == (tmp_path / "cpu" / name).read_bytes()
 
 
+@pytest.mark.parametrize("bit_depth", [8, 16])
+def test_exr_masters_track_the_png_masters_and_resume_byte_for_byte(
+    still_source: source.SourceSet,
+    exr_source: source.SourceSet,
+    tmp_path: pathlib.Path,
+    bit_depth: int,
+) -> None:
+    """P15 step 1: an EXR source goes through the same sink. Within one level of the PNG
+    source of the same picture (half precision, no dither), and a resumed frame is the
+    first run's bytes."""
+    assert exr_source.tile_format == "exr" and still_source.tile_format == "png"
+    png = pipeline.run_master(_job(still_source, tmp_path / "png", bit_depth=bit_depth))
+    first = pipeline.run_master(_job(exr_source, tmp_path / "exr", bit_depth=bit_depth))
+    assert png.written == first.written == len(FRAMES)
+    for frame in FRAMES:
+        name = f"S_S_{frame:04d}.png"
+        with Image.open(tmp_path / "png" / name) as image:
+            expected = np.asarray(image.convert("RGB")).astype(int)
+        with Image.open(tmp_path / "exr" / name) as image:
+            got = np.asarray(image.convert("RGB")).astype(int)  # the high byte at 16 bits
+        assert np.abs(got - expected).max() <= 1, f"frame {frame}"
+
+    target = tmp_path / "exr" / f"S_S_{FRAMES[2]:04d}.png"
+    before = target.read_bytes()
+    target.unlink()
+    again = pipeline.run_master(_job(exr_source, tmp_path / "exr", bit_depth=bit_depth))
+    assert again.written == 1 and again.skipped == len(FRAMES) - 1
+    assert target.read_bytes() == before
+
+
+@pytest.mark.skipif(not _gpu_usable(), reason="no usable CUDA device")
+def test_cuda_masters_from_an_exr_source_are_the_cpu_masters_byte_for_byte(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "MIN_CUDA_MEMORY_BYTES", 1)
+    cuda = pipeline.run_master(_job(exr_source, tmp_path / "cuda", device="cuda", bit_depth=16))
+    cpu = pipeline.run_master(_job(exr_source, tmp_path / "cpu", bit_depth=16))
+    assert cuda.device == "cuda" and cuda.warnings == ()
+    assert cuda.written == cpu.written == len(FRAMES)
+    for frame in FRAMES:
+        name = f"S_S_{frame:04d}.png"
+        assert (tmp_path / "cuda" / name).read_bytes() == (tmp_path / "cpu" / name).read_bytes()
+
+
 def test_write_workers_default_follows_the_device(
     still_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -365,3 +430,141 @@ def test_harmonised_masters_equal_the_frame_command(
     written = tmp_path / "out" / f"S_S_{FRAMES[0]:04d}.png"
     with Image.open(written) as a, Image.open(single) as b:
         assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+# -- the EXR master (P15 step 3) ---------------------------------------------------------------
+
+
+def _exr_job(
+    src: source.SourceSet, directory: pathlib.Path, **overrides: object
+) -> pipeline.MasterJob:
+    return _job(src, directory, out_format="exr", bit_depth=16, **overrides)
+
+
+def test_exr_masters_are_the_sixteen_bit_stitch_in_linear_half(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """`<stem>_S_<frame>.exr`, holding the 16-bit stitch decoded to linear half through the
+    table -- so the file is the stitcher's uint16 output in another encoding, and the same
+    bytes the writer produces when called directly at the same zlib level."""
+    job = _exr_job(exr_source, tmp_path / "out")
+    summary = pipeline.run_master(job)
+    assert summary.written == len(FRAMES) and summary.bytes_written > 0
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [
+        f"S_S_{frame:04d}.exr" for frame in FRAMES
+    ]
+    assert job.frame_path(999).name == "S_S_0999.exr"
+
+    rig = rig_for(exr_source.camera_count)
+    tiles = io.load_tiles(exr_source, FRAMES[0], list(rig.unique_indices))
+    reference = stitch_frame(tiles, rig, NATIVE, bit_depth=16).image
+    expected = exr.half_from_levels16(np.asarray(reference, np.uint16))
+    written = job.frame_path(FRAMES[0])
+    header = exr.probe(written)
+    assert header.channels == ("B", "G", "R"), "RGB only, no alpha"
+    assert (header.width, header.height) == (NATIVE, NATIVE // 2)
+    assert np.array_equal(exr.load_half(written), expected)
+
+    direct = tmp_path / "direct.exr"
+    exr.write_exr(direct, expected, compress_level=job.compress_level)
+    assert written.read_bytes() == direct.read_bytes()
+
+
+def test_exr_masters_resume_byte_for_byte_and_keep_the_part_discipline(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    job = _exr_job(exr_source, tmp_path / "out")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "S_S_0002.exr.part").write_bytes(b"half an EXR")
+    assert 2 in job.pending_frames(), "a .part must not count as present"
+    first = pipeline.run_master(job)
+    assert first.written == len(FRAMES) and first.skipped == 0
+    assert not list((tmp_path / "out").glob("*.part"))
+
+    target = job.frame_path(FRAMES[2])
+    before = target.read_bytes()
+    target.unlink()
+    again = pipeline.run_master(job)
+    assert again.written == 1 and again.skipped == len(FRAMES) - 1
+    assert target.read_bytes() == before
+
+
+def test_an_exr_master_needs_an_exr_source_at_sixteen_bits(
+    still_source: source.SourceSet, exr_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """A PNG source keeps the refusal: nothing in it needs more than a 16-bit PNG master."""
+    with pytest.raises(ValueError, match="EXR source only"):
+        _exr_job(still_source, tmp_path / "out")
+    with pytest.raises(ValueError, match="16-bit stitch"):
+        _job(exr_source, tmp_path / "out", out_format="exr", bit_depth=8)
+    with pytest.raises(ValueError, match="out_format"):
+        _job(exr_source, tmp_path / "out", out_format="tiff")
+
+
+def test_the_exr_estimate_has_its_own_rate(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    job = _exr_job(exr_source, tmp_path / "out")
+    rate = pipeline.EXR_MASTER_BYTES_PER_PIXEL
+    assert job.estimated_bytes() == int(5 * NATIVE * (NATIVE // 2) * rate)
+    assert job.estimated_bytes(2) == int(2 * NATIVE * (NATIVE // 2) * rate)
+    assert rate > 2.83, "must not under-reserve: real 8K EXR masters measure 2.83 bytes/pixel"
+    raw = _exr_job(exr_source, tmp_path / "raw", compress_level=0)
+    assert raw.estimated_bytes() == int(5 * NATIVE * (NATIVE // 2) * 6.0), "level 0: raw halves"
+
+
+def test_compress_level_changes_the_exr_bytes_and_not_the_bits(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    sizes = {}
+    bits = None
+    for level in (0, 1, 6):
+        summary = pipeline.run_master(
+            _exr_job(exr_source, tmp_path / f"l{level}", compress_level=level)
+        )
+        sizes[level] = summary.bytes_written
+        read = exr.load_half(tmp_path / f"l{level}" / f"S_S_{FRAMES[0]:04d}.exr")
+        if bits is None:
+            bits = read
+        assert np.array_equal(read, bits), f"zlib level {level} changed a sample"
+    assert sizes[6] <= sizes[1] < sizes[0]
+
+
+def _ffmpeg() -> encode.Tools | None:
+    try:
+        return encode.find_tools()
+    except encode.FfmpegNotFound:
+        return None
+
+
+@pytest.mark.skipif(_ffmpeg() is None, reason="ffmpeg not available")
+def test_ffmpeg_decodes_an_exr_master_to_the_bits_written(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path
+) -> None:
+    """The independent reading of a master as the sink writes it."""
+    tools = _ffmpeg()
+    assert tools is not None
+    job = _exr_job(exr_source, tmp_path / "out")
+    pipeline.run_master(job)
+    path = job.frame_path(FRAMES[0])
+    command = [str(tools.ffmpeg), "-v", "error", "-i", str(path), "-f", "rawvideo",
+               "-pix_fmt", "gbrpf16le", "-"]  # fmt: skip
+    raw = subprocess.run(command, capture_output=True, check=True).stdout
+    g, b, r = np.frombuffer(raw, np.uint16).reshape(3, NATIVE // 2, NATIVE)
+    assert np.array_equal(np.stack([r, g, b], axis=-1), exr.load_half(path))
+
+
+@pytest.mark.skipif(not _gpu_usable(), reason="no usable CUDA device")
+def test_cuda_exr_masters_are_the_cpu_exr_masters_byte_for_byte(
+    exr_source: source.SourceSet, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import device
+
+    monkeypatch.setattr(device, "MIN_CUDA_MEMORY_BYTES", 1)
+    cuda = pipeline.run_master(_exr_job(exr_source, tmp_path / "cuda", device="cuda"))
+    cpu = pipeline.run_master(_exr_job(exr_source, tmp_path / "cpu"))
+    assert cuda.device == "cuda" and cuda.warnings == ()
+    assert cuda.written == cpu.written == len(FRAMES)
+    for frame in FRAMES:
+        name = f"S_S_{frame:04d}.exr"
+        assert (tmp_path / "cuda" / name).read_bytes() == (tmp_path / "cpu" / name).read_bytes()

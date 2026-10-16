@@ -17,17 +17,27 @@ import re
 import struct
 import sys
 
+from vr_compose import exr
+
 __all__ = [
+    "TILE_FORMATS",
     "CameraFiles",
     "SourceSet",
     "candidate_roots",
     "discover",
     "png_dimensions",
     "scan",
+    "tile_dimensions",
 ]
 
 CAMERA_RE = re.compile(r"^camera[\s_-]*(\d+)$", re.IGNORECASE)
-FRAME_RE = re.compile(r"^(?P<stem>.+)\.(?P<frame>\d{2,8})\.png$", re.IGNORECASE)
+FRAME_RE = re.compile(r"^(?P<stem>.+)\.(?P<frame>\d{2,8})\.(?P<format>png|exr)$", re.IGNORECASE)
+TILE_FORMATS = ("png", "exr")
+"""8-bit sRGB PNG, or the half-float linear EXR upstream writes since its A4 (P15).
+
+One directory holds one format. A mix -- within a camera or across cameras -- is reported
+as a problem, never resolved by preference: it can only come from copying by hand, and
+the two would not be the same capture."""
 OUTPUT_DIR_NAMES = frozenset({"finishtaskoutput", "output", "out"})
 TILE_SEARCH_DEPTH = 1
 """How far below ``CameraN/`` to look for tiles. The reference data uses ``Tempory/``."""
@@ -45,19 +55,32 @@ def png_dimensions(path: pathlib.Path) -> tuple[int, int]:
     return int(width), int(height)
 
 
+def tile_dimensions(path: pathlib.Path) -> tuple[int, int]:
+    """``(width, height)`` of a PNG or EXR tile from its header. Never decodes.
+
+    For an EXR this also rejects any layout :mod:`vr_compose.exr` does not read, so a
+    source set is refused when it is scanned rather than at its first frame.
+    """
+    if path.suffix.lower() == ".exr":
+        header = exr.probe(path)
+        return header.width, header.height
+    return png_dimensions(path)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class CameraFiles:
     """One camera's frames for one stem."""
 
     index: int
     directory: pathlib.Path
+    tile_format: str
     frames: tuple[int, ...]
     width: int
     height: int
     total_bytes: int
 
     def path_for(self, stem: str, frame: int, digits: int) -> pathlib.Path:
-        return self.directory / f"{stem}.{frame:0{digits}d}.png"
+        return self.directory / f"{stem}.{frame:0{digits}d}.{self.tile_format}"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -95,6 +118,12 @@ class SourceSet:
         return width if width == height else None
 
     @property
+    def tile_format(self) -> str | None:
+        """``"png"`` or ``"exr"``, or None when the cameras disagree."""
+        formats = {camera.tile_format for camera in self.cameras}
+        return formats.pop() if len(formats) == 1 else None
+
+    @property
     def total_bytes(self) -> int:
         return sum(c.total_bytes for c in self.cameras)
 
@@ -117,6 +146,7 @@ class SourceSet:
             f"root       : {self.root}",
             f"stem       : {self.stem}",
             f"cameras    : {self.camera_count}",
+            f"format     : {self.tile_format or 'MIXED'}",
             f"tile       : {f'{size}x{size}' if size else 'INCONSISTENT / not square'}",
             f"frames     : {span}",
             f"size       : {self.total_bytes / 2**30:.2f} GiB",
@@ -173,17 +203,25 @@ def scan(root: pathlib.Path) -> list[SourceSet]:
     for index, camera_dir in sorted(camera_dirs):
         tile_dir = _tile_directory(camera_dir)
         if tile_dir is None:
-            shared_problems.append(f"Camera{index}: no numbered PNGs found")
+            shared_problems.append(f"Camera{index}: no numbered PNG or EXR tiles found")
             continue
-        grouped: dict[str, list[pathlib.Path]] = collections.defaultdict(list)
+        grouped: dict[str, dict[str, list[pathlib.Path]]] = collections.defaultdict(
+            lambda: collections.defaultdict(list)
+        )
         for path in tile_dir.iterdir():
             if path.is_file() and (match := FRAME_RE.match(path.name)):
-                grouped[match.group("stem")].append(path)
+                grouped[match.group("stem")][match.group("format").lower()].append(path)
                 digits_by_stem[match.group("stem")].add(len(match.group("frame")))
-        for stem, paths in grouped.items():
+        for stem, by_format in grouped.items():
+            if len(by_format) > 1:
+                shared_problems.append(
+                    f"Camera{index}/{stem}: PNG and EXR tiles are mixed in {tile_dir}; "
+                    "a directory holds one format"
+                )
+            tile_format, paths = sorted(by_format.items())[0]
             frames = sorted(int(m.group("frame")) for p in paths if (m := FRAME_RE.match(p.name)))
             try:
-                width, height = png_dimensions(paths[0])
+                width, height = tile_dimensions(paths[0])
             except (OSError, ValueError) as exc:
                 shared_problems.append(f"Camera{index}/{stem}: {exc}")
                 continue
@@ -191,6 +229,7 @@ def scan(root: pathlib.Path) -> list[SourceSet]:
                 CameraFiles(
                     index=index,
                     directory=tile_dir,
+                    tile_format=tile_format,
                     frames=tuple(frames),
                     width=width,
                     height=height,
@@ -229,6 +268,11 @@ def _problems(cameras: list[CameraFiles], shared: list[str], digit_widths: set[i
                 f"tiles are not square ({width}x{height}); the registered rigs assume a "
                 "square FOV, so this is a different layout"
             )
+    formats = {camera.tile_format for camera in cameras}
+    if len(formats) != 1:
+        found.append(
+            f"cameras disagree on tile format: {sorted(formats)}; a source holds one format"
+        )
     counts = {len(camera.frames) for camera in cameras}
     if len(counts) != 1:
         found.append(f"cameras hold different frame counts: {sorted(counts)}")

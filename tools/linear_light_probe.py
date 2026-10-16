@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     chosen = found[0]
     rig = rig_for(chosen.camera_count)
-    tiles = io.load_tiles(chosen, args.frame, list(rig.unique_indices), workers=8)
+    tiles = io.uint8_tiles(io.load_tiles(chosen, args.frame, list(rig.unique_indices), workers=8))
     height = args.width // 2
     print(f"frame {args.frame}, {args.width}x{height}, sRGB transfer assumed for the source\n")
 

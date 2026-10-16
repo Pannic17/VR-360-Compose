@@ -247,8 +247,8 @@ class ComposeWindow(QMainWindow):
                 for problem in rejected.problems:
                     self.log(f"  - {problem}")
             self.log(
-                "一个来源目录至少要有两个 `CameraN` 子目录，里面的 PNG 名为 "
-                "`<stem>.<帧号>.png`（直接放在里面或再下一层都行）。"
+                "一个来源目录至少要有两个 `CameraN` 子目录，里面的 PNG 或 EXR 名为 "
+                "`<stem>.<帧号>.png` / `.exr`（直接放在里面或再下一层都行，一个目录只放一种格式）。"
             )
             self._set_stems([])
             self.set_status("fail", "无来源")

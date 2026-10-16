@@ -208,7 +208,7 @@ def test_a_cancelled_run_exits_130_not_as_a_failure(
     assert "cancelled after 7 of 99" in err, "say how far it got"
 
 
-def _png_source(root: pathlib.Path) -> None:
+def _png_source(root: pathlib.Path, tile_format: str = "png") -> None:
     rig = twenty_file_rig()
     panorama = analytic_panorama(256, 128)
     make_source_tree(
@@ -218,6 +218,7 @@ def _png_source(root: pathlib.Path) -> None:
         frames=[1, 2],
         size=(64, 64),
         tile_for=lambda camera, _frame: sample_panorama_into_tile(panorama, rig, camera, 64),
+        tile_format=tile_format,
     )
 
 
@@ -330,13 +331,31 @@ def test_a_run_with_audio_reports_the_track(
     assert "conformance: OK" in printed
 
 
-def test_exr_says_why_it_is_not_implemented(tmp_path: pathlib.Path) -> None:
-    """The interface is reserved; the reason it is empty is a source-side fact."""
-    _png_source(tmp_path / "src")
+def test_exr_masters_come_from_exr_sources_only(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P15 step 3: an EXR source writes `.exr` masters; a PNG source is refused and told
+    what to use instead; `--bit-depth` has nothing to choose there and is refused too."""
+    _png_source(tmp_path / "png")
     with pytest.raises(SystemExit) as caught:
-        main(["--source", str(tmp_path / "src"), "sequence", "--out-format", "exr", "--no-bar"])
+        main(["--source", str(tmp_path / "png"), "sequence", "--out-format", "exr", "--no-bar"])
     message = str(caught.value)
-    assert "8-bit" in message and "--out-format png" in message
+    assert "EXR source only" in message and "--out-format png --bit-depth 16" in message
+
+    _png_source(tmp_path / "exr", tile_format="exr")
+    base = ["--source", str(tmp_path / "exr"), "sequence", "--out-format", "exr", "--no-bar"]
+    with pytest.raises(SystemExit) as caught:
+        main([*base, "--bit-depth", "16"])
+    assert "--bit-depth only applies to --out-format png" in str(caught.value)
+    with pytest.raises(SystemExit) as caught:
+        main([*base, "--codec", "h265"])
+    assert "only apply to --out-format mp4" in str(caught.value)
+
+    out = tmp_path / "masters"
+    assert main([*base, "--out", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["S_S_0001.exr", "S_S_0002.exr"]
+    printed = capsys.readouterr().out
+    assert "master     : 256x128 linear half-float EXR" in printed, printed
 
 
 def test_auto_named_output_uses_the_stem_and_a_timestamp(

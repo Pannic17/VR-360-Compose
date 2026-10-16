@@ -261,7 +261,8 @@ class Warps:
 
     def load(self, frame: int, cameras: Sequence[int]) -> dict[int, U8]:
         if frame not in self.tiles:
-            self.tiles[frame] = io.load_tiles(self.chosen, frame, list(cameras), workers=8)
+            loaded = io.load_tiles(self.chosen, frame, list(cameras), workers=8)
+            self.tiles[frame] = io.uint8_tiles(loaded)
         return self.tiles[frame]
 
     def get(self, camera: int, frame: int, cameras: Sequence[int]) -> tuple[F64, Bool]:

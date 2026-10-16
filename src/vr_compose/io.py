@@ -1,12 +1,16 @@
 """Reading tiles and writing panoramas.
 
-Two things this layer deliberately does:
+Three things this layer deliberately does:
 
-* **Drops alpha on read.** Every source tile is RGBA with alpha uniformly 255, so a
+* **Drops alpha on read.** Every source tile is RGBA with alpha uniformly opaque, so a
   quarter of each file carries no information (AGENTS.md §4). Nothing downstream should
   ever see a fourth channel.
+* **Reads an EXR as sRGB levels, not linear.** The upstream EXR is the PNG's image before
+  its sRGB encode and 8-bit dither (UPSTREAM.md item 3), so encoding on read gives the
+  pipeline the quantity it already works in, as float32 and without the quantisation
+  (:mod:`vr_compose.exr`, ROADMAP P15 step 1).
 * **Writes RGB, not RGBA.** The reference output has alpha 253..255 -- rounding debris
-  from an alpha-weighted blend. Ours has no alpha at all.
+  from an alpha-weighted blend. Ours has no alpha at all, PNG or EXR.
 """
 
 from __future__ import annotations
@@ -15,12 +19,15 @@ import concurrent.futures
 import pathlib
 import struct
 import zlib
+from collections.abc import Callable, Mapping
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from vr_compose import exr
 from vr_compose.source import SourceSet
+from vr_compose.stitch import Tile
 
 U8 = npt.NDArray[np.uint8]
 U16 = npt.NDArray[np.uint16]
@@ -31,6 +38,8 @@ __all__ = [
     "Panorama",
     "load_tile",
     "load_tiles",
+    "uint8_tiles",
+    "write_exr_atomically",
     "write_png",
     "write_png16",
     "write_png_atomically",
@@ -40,15 +49,18 @@ Image.MAX_IMAGE_PIXELS = None
 """The 7680x3840 panorama trips Pillow's decompression-bomb guard."""
 
 
-def load_tile(path: pathlib.Path) -> U8:
-    """One tile as an ``(n, n, 3)`` uint8 array. Alpha is discarded."""
+def load_tile(path: pathlib.Path) -> Tile:
+    """One tile as an ``(n, n, 3)`` array of 8-bit levels: uint8 from a PNG, float32
+    from an EXR. Alpha is discarded either way."""
+    if path.suffix.lower() == ".exr":
+        return exr.load_levels(path)
     with Image.open(path) as image:
         return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
 
 def load_tiles(
     source: SourceSet, frame: int, indices: list[int], *, workers: int = 1
-) -> dict[int, U8]:
+) -> dict[int, Tile]:
     """Load the given cameras' tiles for one frame.
 
     `workers` above 1 uses threads: PNG decoding happens inside Pillow's C code with the
@@ -61,6 +73,23 @@ def load_tiles(
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         loaded = pool.map(lambda index: (index, load_tile(source.tile_path(index, frame))), indices)
         return dict(loaded)
+
+
+def uint8_tiles(tiles: Mapping[int, Tile]) -> dict[int, U8]:
+    """The same tiles typed uint8; float ones are refused.
+
+    For the probes under `tools/` that measure the 8-bit source as such -- lookup tables
+    indexed by level, prototype kernels reading bytes. Pointed at an EXR source they would
+    be silently wrong, so they are told instead.
+    """
+    narrowed: dict[int, U8] = {}
+    for camera, tile in tiles.items():
+        if tile.dtype != np.uint8:
+            raise ValueError(
+                f"camera {camera}: this needs 8-bit PNG tiles, got {tile.dtype} (an EXR source)"
+            )
+        narrowed[camera] = np.asarray(tile, dtype=np.uint8)
+    return narrowed
 
 
 def write_png16(path: pathlib.Path, image: U16, *, compress_level: int = 1) -> int:
@@ -113,6 +142,18 @@ def write_png16(path: pathlib.Path, image: U16, *, compress_level: int = 1) -> i
     return path.stat().st_size
 
 
+def _write_atomically(path: pathlib.Path, write: Callable[[pathlib.Path], int]) -> int:
+    """Run `write` on `<path>.part`, then rename. A failure leaves no `.part` behind."""
+    partial = path.with_name(path.name + ".part")
+    try:
+        size = write(partial)
+        partial.replace(path)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return size
+
+
 def write_png_atomically(path: pathlib.Path, image: Panorama, *, compress_level: int = 6) -> int:
     """Write through `<path>.part` and rename. Returns the size in bytes.
 
@@ -121,17 +162,24 @@ def write_png_atomically(path: pathlib.Path, image: Panorama, *, compress_level:
 
     Dispatches on dtype: 16-bit goes through :func:`write_png16`, 8-bit through Pillow.
     """
-    partial = path.with_name(path.name + ".part")
-    try:
-        if image.dtype == np.uint16:
-            size = write_png16(partial, np.asarray(image, np.uint16), compress_level=compress_level)
-        else:
-            size = write_png(partial, np.asarray(image, np.uint8), compress_level=compress_level)
-        partial.replace(path)
-    except BaseException:
-        partial.unlink(missing_ok=True)
-        raise
-    return size
+    if image.dtype == np.uint16:
+        deep = np.asarray(image, np.uint16)
+        return _write_atomically(
+            path, lambda part: write_png16(part, deep, compress_level=compress_level)
+        )
+    shallow = np.asarray(image, np.uint8)
+    return _write_atomically(
+        path, lambda part: write_png(part, shallow, compress_level=compress_level)
+    )
+
+
+def write_exr_atomically(path: pathlib.Path, half: U16, *, compress_level: int = 1) -> int:
+    """The EXR master's :func:`write_png_atomically`: `half` is the panorama as half bits
+    (:func:`vr_compose.exr.half_from_levels16`), written by :func:`vr_compose.exr.write_exr`
+    through `<path>.part`."""
+    return _write_atomically(
+        path, lambda part: exr.write_exr(part, half, compress_level=compress_level)
+    )
 
 
 def write_png(path: pathlib.Path, image: U8, *, compress_level: int = 6) -> int:

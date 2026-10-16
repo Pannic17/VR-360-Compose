@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from collections.abc import Mapping
 
 import numpy as np
 import numpy.typing as npt
 
 from vr_compose import projection
 from vr_compose.rig import Rig
+from vr_compose.stitch import Tile
 
 __all__ = [
     "DEFAULT_LAYOUT_GATE",
@@ -45,7 +47,6 @@ __all__ = [
 ]
 
 F64 = npt.NDArray[np.float64]
-U8 = npt.NDArray[np.uint8]
 Shift = tuple[float, float, float]
 
 LAYOUT_GATES = ("on", "off")
@@ -237,7 +238,7 @@ def _directions(width: int, rows: slice, cols: slice) -> F64:
     return np.asarray(dirs.reshape(3, -1), dtype=np.float64)
 
 
-def warp_luma(tile: U8, rig: Rig, index: int, dirs: F64) -> tuple[F64, npt.NDArray[np.bool_]]:
+def warp_luma(tile: Tile, rig: Rig, index: int, dirs: F64) -> tuple[F64, npt.NDArray[np.bool_]]:
     """One camera's bilinear luma at `dirs`, plus where the camera actually reaches."""
     size = tile.shape[0]
     view = rig.view_for(index)
@@ -315,7 +316,7 @@ def _shifts(
     return found
 
 
-def pair_shifts(tiles: dict[int, U8], rig: Rig, a: int, b: int, width: int) -> PairShift:
+def pair_shifts(tiles: Mapping[int, Tile], rig: Rig, a: int, b: int, width: int) -> PairShift:
     """Measure one pair at `width` (2:1 equirect), warping only the overlap's box."""
     box = _overlap_box(rig, a, b, width)
     found: list[Shift] = []
@@ -330,7 +331,7 @@ def pair_shifts(tiles: dict[int, U8], rig: Rig, a: int, b: int, width: int) -> P
     return PairShift(a, b, tuple(found), 360.0 / width)
 
 
-def check(tiles: dict[int, U8], rig: Rig, *, width: int | None = None) -> LayoutReport:
+def check(tiles: Mapping[int, Tile], rig: Rig, *, width: int | None = None) -> LayoutReport:
     """The layout gate's measurement for one frame: all ten pairs at the analysis width."""
     started = time.time()
     if width is None:

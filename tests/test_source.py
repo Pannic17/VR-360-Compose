@@ -12,7 +12,7 @@ import pathlib
 import numpy as np
 import pytest
 
-from conftest import encode_png, make_source_tree
+from conftest import encode_exr, encode_png, make_source_tree
 from vr_compose import source
 
 
@@ -194,6 +194,62 @@ def test_png_dimensions_reads_the_header_only(tmp_path: pathlib.Path) -> None:
     bad.write_bytes(b"definitely not a png")
     with pytest.raises(ValueError, match="not a PNG"):
         source.png_dimensions(bad)
+
+
+def test_tile_dimensions_reads_either_header(tmp_path: pathlib.Path) -> None:
+    png = tmp_path / "t.png"
+    png.write_bytes(encode_png(np.zeros((5, 9, 3), np.uint8)))
+    hdr = tmp_path / "t.exr"
+    hdr.write_bytes(encode_exr(np.zeros((5, 9, 3), np.float32)))
+    assert source.tile_dimensions(png) == source.tile_dimensions(hdr) == (9, 5)
+
+
+def test_exr_tiles_are_detected_and_sized_from_their_header(tmp_path: pathlib.Path) -> None:
+    make_source_tree(
+        tmp_path, cameras=3, stem="S", frames=range(1, 4), size=(12, 12), tile_format="exr"
+    )
+    found = [s for s in source.scan(tmp_path) if s.usable]
+    assert len(found) == 1
+    assert found[0].tile_format == "exr" and found[0].tile_size == 12
+    assert found[0].frames == (1, 2, 3)
+    assert found[0].tile_path(2, 3).name == "S.0003.exr"
+    assert "format     : exr" in found[0].describe()
+
+
+def test_png_and_exr_in_one_camera_directory_is_a_problem(tmp_path: pathlib.Path) -> None:
+    """One directory, one format: a mix is reported, not resolved by preference."""
+    make_source_tree(tmp_path, cameras=2, stem="S", frames=[1, 2])
+    stray = tmp_path / "Camera1" / "Tempory" / "S.0003.exr"
+    stray.write_bytes(encode_exr(np.zeros((16, 16, 3), np.float32)))
+    (found,) = source.scan(tmp_path)
+    assert not found.usable
+    assert any("PNG and EXR tiles are mixed" in problem for problem in found.problems)
+
+
+def test_cameras_disagreeing_on_format_are_refused(tmp_path: pathlib.Path) -> None:
+    make_source_tree(tmp_path, cameras=2, stem="S", frames=[1, 2])
+    third = tmp_path / "Camera3" / "Tempory"
+    third.mkdir(parents=True)
+    for frame in (1, 2):
+        (third / f"S.{frame:04d}.exr").write_bytes(encode_exr(np.zeros((16, 16, 3), np.float32)))
+    (found,) = source.scan(tmp_path)
+    assert found.camera_count == 3 and found.tile_format is None
+    assert not found.usable
+    assert any("disagree on tile format" in problem for problem in found.problems)
+    assert "format     : MIXED" in found.describe()
+
+
+def test_an_exr_layout_the_reader_does_not_handle_is_a_problem(tmp_path: pathlib.Path) -> None:
+    """Refused at scan time, with the reason, rather than at the first frame."""
+    make_source_tree(tmp_path, cameras=2, stem="S", frames=[1], tile_format="exr")
+    path = tmp_path / "Camera1" / "Tempory" / "S.0001.exr"
+    data = path.read_bytes()
+    zipped = b"compression\0compression\0\x01\0\0\0\x03"
+    assert zipped in data
+    path.write_bytes(data.replace(zipped, zipped[:-1] + b"\x04", 1))  # PIZ
+    sets = source.scan(tmp_path)
+    assert sets and not sets[0].usable
+    assert any("PIZ" in problem for problem in sets[0].problems)
 
 
 def test_discover_reports_where_it_looked(tmp_path: pathlib.Path) -> None:
