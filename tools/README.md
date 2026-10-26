@@ -15,8 +15,9 @@
 | `coverage_map.py` | §3 球面覆盖与采样密度 | 数秒 |
 | `resample_probe.py` | §3「重采样到底在做什么」—— 映射的雅可比，决定 P4 的滤波器 | 数秒 |
 | `linear_light_probe.py` | §8「线性光混合」—— 分别量混合与插值改到线性光的效果 | 约 1 分钟 |
+| `linear_probe.py` | P15 第二步 / §10「线性光混合、极区余量与输出编码」—— `variants`：在产品那张 `WarpPlan` 上跑四种算术（V0 生产、V1 只混合线性、V2 插值 + 混合线性、V3 和谐化改增益），先验 V0 与 `WarpPlan.apply` 逐字节相同，再按接缝带后的 tile 数、tile 间 std、级值、梯度、纬度分解差值，存热图与最差处裁图，`--ab-frames` 出每种算术的 8K PNG；`encode`：half 表与分段表两种 sRGB 编码对精确曲线的误差（全部 float32、均匀扫描、真实一帧），`--device cuda` 逐字节比 GPU 核函数。只读 EXR 源 | `variants` 8K 每帧约 2 分钟、A/B 每帧约 1.5 分钟；`encode` 约 6 分钟 |
 | `detail_probe.py` | §8/§9「极区细节保留度」—— 源 tile 与母版按纬度的局部对比度 | 约 1 分钟 |
-| `fidelity_probe.py` | §8「三个采样器」—— 母版往返回 tile 的还原 PSNR，**这才是保真度指标** | 约 2 分钟 |
+| `fidelity_probe.py` | §8「三个采样器」—— 母版往返回 tile 的还原 PSNR，**这才是保真度指标**；P15 第二步加了 `--inputs exr dither round png=<采集>` 与 `--bands`：EXR 浮点级值当真值，同一帧换输入、8 / 16 bit 各拼一次，按 tile 像素落到的纬度带汇总（§10「极区余量」） | 约 2 分钟；`--inputs` 8K 每帧约 4 分钟 |
 | `seam_probe.py` | §8「接缝、羽化指数」—— 20 点接缝梯度不连续性 + 羽化扫描 | 约 2 分钟 |
 | `temporal_probe.py` | §8「时域稳定性」—— 连续 10 帧的方差与与网格无关的跳变界 | 约 4 分钟 |
 | `encode_probe.py` | §5 交付规格的全部实测数字，含编码器内存 | 见各子命令 |
@@ -135,6 +136,11 @@ median 0.68   mean 1.02   p95 3.10   std>8 = 0.25%
 两轴同时缩小的方向占 0.1%；`--tile 3840 --output-width 7680` 则是 100% 在缩小。
 跑 `fidelity_probe.py` 应当得到还原 PSNR nearest 47.85 / bilinear 47.66 / catmullrom 48.90 dB
 —— **注意它和指标 A 的排序相反**，指标 A 量一致性、这个量保真度，别混用。
+跑 `fidelity_probe.py --root <A4_Demo EXR 采集> --frame 571 --bands --inputs exr dither round png=<A4_Demo PNG 采集>`
+应当得到极冠（整张 tile）EXR 16-bit 47.65 dB 对抖动 8-bit 47.24、mean|e| 0.36 对 0.52 级，抖动 tile 自身 55.9 dB。
+跑 `linear_probe.py variants <A4_Demo EXR 采集> --frames 571 --out-dir <目录>` 应当先打印 `V0 vs WarpPlan.apply (16-bit): identical`，
+再得到 V1 − V0 mean 0.0055、V2 − V0 关和谐化 0.125 级；`linear_probe.py encode --device cuda` 应当两种表都 `GPU bytes differ: 0`、
+half 表 max 0.041 级、分段表 max 1.03e-4 级。
 跑 `seam_probe.py` 应当得到接缝比 median 约 0.79（<1 就是没有接缝），且各羽化指数下 p95/max 相同。
 跑 `temporal_probe.py` 应当得到 nearest 四个纬度带的跳变界全部 PASS（凸核必然如此），
 catmullrom 在赤道超出约 1.1%；极冠的方差比值 >1 是网格差异，不是抖动（见 §8）。

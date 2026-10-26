@@ -526,9 +526,18 @@ def segment_table() -> F32:
     return np.asarray(encode_exact(starts), dtype=np.float32)
 
 
+FLOOR = np.float32(2.0**-64)
+"""Inputs below this encode as 0 on both sides. cupy compiles every kernel with `-ftz=true`
+(appended after the caller's options), so the GPU flushes denormal operands and results;
+above this floor no operand or intermediate of either encode is denormal, and below it the
+exact level is under 2e-16."""
+
+
 def clamp_unit(linear: F32) -> F32:
-    """What both encodes see: NaN to 0, then 0..1."""
-    return np.asarray(np.clip(np.nan_to_num(linear, nan=0.0), 0.0, 1.0), dtype=np.float32)
+    """What both encodes see: NaN to 0, then 0..1, then the floor -- which also turns -0.0
+    into +0.0 (a clamp keeps the sign bit, and the segment index reads it)."""
+    clamped = np.clip(np.nan_to_num(linear, nan=0.0), 0.0, 1.0).astype(np.float32)
+    return np.asarray(np.where(clamped < FLOOR, np.float32(0.0), clamped), dtype=np.float32)
 
 
 def encode_half_table(linear: F32, table: F32) -> F32:
@@ -573,6 +582,7 @@ extern "C" __global__ void encode_half(
     long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float v = fminf(fmaxf(linear[i], 0.0f), 1.0f);          // NaN -> 0, then 0..1
+    if (v < 5.42101086242752217e-20f) v = 0.0f;              // FLOOR = 2^-64; -0 -> +0
     unsigned short code = __half_as_ushort(__float2half_rn(v));
     out[i] = table[code];
 }
@@ -582,6 +592,7 @@ extern "C" __global__ void encode_segment(
     long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float v = fminf(fmaxf(linear[i], 0.0f), 1.0f);
+    if (v < 5.42101086242752217e-20f) v = 0.0f;
     unsigned int bits = __float_as_uint(v);
     unsigned int index = bits >> 15;
     float t = (float)(bits & 0x7FFFu) * (1.0f / 32768.0f);
@@ -657,7 +668,7 @@ class Tally:
             f"8-bit off {self.off8 / max(self.count, 1) * 100:.4f}%   "
             f"16-bit off {self.off16 / max(self.count, 1) * 100:.3f}%"
         )
-        if gpu:
+        if gpu and self.name != "powf":
             text += f"   GPU bytes differ: {self.gpu_mismatch}"
         return text
 
