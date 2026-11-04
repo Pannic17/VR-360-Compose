@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import fractions
 import json
 import pathlib
 import sys
@@ -34,8 +35,9 @@ from tqdm import tqdm
 from vr_compose import __version__, encode, harmonise, io, layout, pipeline, spherical, verify
 from vr_compose import audio as audio_mod
 from vr_compose import device as device_mod
+from vr_compose import manifest as manifest_mod
 from vr_compose import source as source_mod
-from vr_compose.rig import Rig, UnknownRigError, rig_for
+from vr_compose.rig import Rig, UnknownRigError
 from vr_compose.stitch import (
     BIT_DEPTHS,
     DEFAULT_BAND_ROWS,
@@ -177,6 +179,38 @@ def _layout_note(rig: Rig, layout_gate: str | None) -> str | None:
 
 GATE_OFF_NOTE = "geometry   : gate off -- overlap agreement not judged"
 
+FPS_CHOICES = (30, 60)
+DEFAULT_FPS = 30
+
+
+def _delivery_fps(requested: int | None, rate: fractions.Fraction | None) -> tuple[int, str | None]:
+    """The delivery frame rate, and the line a report adds about it, if any.
+
+    Unasked, it is the capture's own rate from its manifest -- a 60 fps capture encoded
+    at 30 plays at half speed -- and the default without one. A capture rate no delivery
+    has (24, 29.97) is refused rather than rounded: either delivery rate changes the
+    playback speed, so choosing one is the user's call. An asked rate is used, with a
+    warning when the manifest says the capture is another.
+    """
+    if requested is None:
+        if rate is None:
+            return DEFAULT_FPS, None
+        if rate in FPS_CHOICES:
+            return int(rate), f"fps        : {rate} from the manifest"
+        speeds = " or ".join(f"{float(fps / rate):.2f}x" for fps in FPS_CHOICES)
+        raise SystemExit(
+            f"the capture is {manifest_mod.describe_rate(rate)} fps (manifest frames.rate) "
+            f"and a delivery is {' or '.join(str(fps) for fps in FPS_CHOICES)}. Pass --fps "
+            f"to choose one; the video then plays at {speeds} the capture's speed."
+        )
+    if rate is not None and rate != requested:
+        return requested, (
+            f"WARNING    : --fps {requested}, but the capture is "
+            f"{manifest_mod.describe_rate(rate)} fps (manifest frames.rate); the video plays "
+            f"at {float(requested / rate):.2f}x its speed"
+        )
+    return requested, None
+
 
 def cmd_discover(args: argparse.Namespace) -> int:
     found, searched = source_mod.discover(args.source)
@@ -193,11 +227,14 @@ def cmd_discover(args: argparse.Namespace) -> int:
     for candidate in found:
         print(candidate.describe())
         try:
-            rig = rig_for(candidate.camera_count)
+            choice = manifest_mod.choose_rig(candidate)
+            rig = choice.rig
             print(
                 f"rig        : {rig.name}  fov={rig.fov_deg:g}deg  "
                 f"{len(rig.unique_indices)} distinct of {rig.file_count} files"
             )
+            for line in choice.lines():
+                print(line)
             if rig.duplicate_indices:
                 print(f"redundant  : cameras {list(rig.duplicate_indices)} duplicate other views")
             if (note := _layout_note(rig, None)) is not None:
@@ -213,9 +250,10 @@ def cmd_frame(args: argparse.Namespace) -> int:
     chosen = _select_stem(candidates, args.stem) if candidates else _resolve_source(args.source)
 
     try:
-        rig = rig_for(chosen.camera_count)
+        choice = manifest_mod.choose_rig(chosen)
     except UnknownRigError as exc:
         raise SystemExit(str(exc)) from None
+    rig = choice.rig
 
     frames = chosen.frames
     frame = args.frame if args.frame is not None else frames[0]
@@ -234,6 +272,8 @@ def cmd_frame(args: argparse.Namespace) -> int:
     indices = list(rig.unique_indices)
     print(f"source     : {chosen.root}  stem {chosen.stem!r}")
     print(f"rig        : {rig.name}, reading {len(indices)} of {rig.file_count} files")
+    for line in choice.lines():
+        print(line)
     if (note := _layout_note(rig, args.layout_gate)) is not None:
         print(note)
     started = time.time()
@@ -415,7 +455,7 @@ def _reject_inapplicable(args: argparse.Namespace, names: tuple[str, ...], why: 
 def cmd_master(
     args: argparse.Namespace,
     chosen: source_mod.SourceSet,
-    rig: Rig,
+    choice: manifest_mod.RigChoice,
     frames: list[int],
     stamp: str,
 ) -> int:
@@ -440,6 +480,7 @@ def cmd_master(
             "only applies to --out-format png; an EXR master is always the 16-bit stitch, "
             "written as linear half-float.",
         )
+    rig = choice.rig
     tile = chosen.tile_size
     if tile is None:
         raise SystemExit("source tiles are not square or not uniform; cannot stitch")
@@ -479,6 +520,8 @@ def cmd_master(
     report.say(
         f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
     )
+    for line in choice.lines():
+        report.say(line)
     if (note := _layout_note(rig, args.layout_gate)) is not None:
         report.say(note)
     report.say(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
@@ -611,9 +654,10 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     candidates = [s for s in source_mod.scan(args.source) if s.usable] if args.source else []
     chosen = _select_stem(candidates, args.stem) if candidates else _resolve_source(args.source)
     try:
-        rig = rig_for(chosen.camera_count)
+        choice = manifest_mod.choose_rig(chosen)
     except UnknownRigError as exc:
         raise SystemExit(str(exc)) from None
+    rig = choice.rig
     try:
         frames = pipeline.parse_frames(args.frames, chosen.frames)
     except ValueError as exc:
@@ -622,19 +666,20 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     # segment directory derived from it, so a second reading could split a job in two.
     stamp = pipeline.run_stamp()
     if args.out_format != "mp4":
-        return cmd_master(args, chosen, rig, frames, stamp)
+        return cmd_master(args, chosen, choice, frames, stamp)
     _reject_inapplicable(
         args, MASTER_ONLY, "only apply to --out-format png/exr; an MP4 is not a frame sequence."
     )
     if args.audio is None:
         _reject_inapplicable(args, AUDIO_FORMAT, "only apply with --audio.")
+    fps, fps_line = _delivery_fps(args.fps, choice.rate)
 
     try:
         spec = encode.EncodeSpec.for_size(
             args.size,
             args.codec,
             args.bitrate,
-            args.fps,
+            fps,
             preset=args.preset,
             deterministic=args.deterministic,
             encoder_threads=args.encoder_threads,
@@ -680,8 +725,12 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     report.say(
         f"rig        : {rig.name}, reading {len(rig.unique_indices)} of {rig.file_count} files"
     )
+    for line in choice.lines():
+        report.say(line)
     if (note := _layout_note(rig, args.layout_gate)) is not None:
         report.say(note)
+    if fps_line is not None:
+        report.say(fps_line)
     report.say(
         f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), "
         f"{len(job.segments())} segment(s) of up to {job.segment_frames}"
@@ -967,7 +1016,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="high",
         help="rung of the per-size ladder: 8k 200/150/100 Mbps, 4k 57/43/28 Mbps",
     )
-    sequence.add_argument("--fps", type=int, default=30, choices=(30, 60))
+    sequence.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        choices=FPS_CHOICES,
+        help=f"delivery frame rate. Default: the capture's own, from its manifest, or "
+        f"{DEFAULT_FPS} without one. A rate other than the manifest's is used, with a "
+        "warning that the video plays faster or slower than it was captured",
+    )
     sequence.add_argument("--preset", default="medium", help="x264/x265 preset; never ultrafast")
     sequence.add_argument(
         "--stitch-at",

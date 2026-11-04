@@ -21,8 +21,13 @@ from collections.abc import Callable
 
 import pytest
 
-from conftest import analytic_panorama, make_source_tree, sample_panorama_into_tile
-from vr_compose import layout, pipeline
+from conftest import (
+    analytic_panorama,
+    make_source_tree,
+    manifest_document,
+    sample_panorama_into_tile,
+)
+from vr_compose import layout, manifest, pipeline
 from vr_compose.rig import twenty_file_rig
 
 pytest.importorskip("PySide6", reason="the GUI needs PySide6")
@@ -173,6 +178,35 @@ def test_a_valid_source_fills_in_the_rig_and_a_safe_frame_range(
         # 0 is not contiguous with 5..7, so the prefill is the tail and the log says why
         assert window.frames_edit.text() == "5-7"
         assert "0000" in window.log_edit.toPlainText()
+    finally:
+        window.close()
+
+
+def test_a_capture_s_manifest_sets_the_frame_rate(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    """The window always sends --fps, so the CLI's "the capture's rate unless asked" has to
+    reach the combo -- and a manifest that is not used must not move it."""
+    for name, state in (("told", "finished"), ("killed", "rendering")):
+        make_source_tree(
+            tmp_path / name, cameras=15, stem="S", frames=(600, 601), inner=None, name_digits=2
+        )
+        document = manifest_document(stem="S", frames=(600, 601), size=16, rate=(60, 1))
+        document["state"] = state
+        (tmp_path / name / manifest.MANIFEST_NAME).write_text(json.dumps(document), "utf-8")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "killed"))
+        window.discover()
+        assert window.fps_combo.currentText() == "30"
+        assert "清单没用上（state 'rendering'" in window.log_edit.toPlainText()
+
+        window.source_edit.setText(str(tmp_path / "told"))
+        window.discover()
+        assert window.fps_combo.currentText() == "60"
+        assert "装配按清单认：pano-15，采集 60 fps" in window.log_edit.toPlainText()
+        argv = window.build_command()
+        assert argv is not None and argv[argv.index("--fps") + 1] == "60"
     finally:
         window.close()
 

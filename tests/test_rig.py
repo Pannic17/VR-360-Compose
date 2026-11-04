@@ -16,6 +16,7 @@ from vr_compose.rig import (
     View,
     fifteen_file_rig,
     rig_for,
+    rig_for_views,
     twenty_file_rig,
 )
 
@@ -121,6 +122,43 @@ def test_registry_resolves_the_known_layouts() -> None:
     assert rig_for(20).name == "camera360-20"
     assert rig_for(15).name == "pano-15"
     assert set(REGISTRY) == {15, 20}
+
+
+def test_views_in_the_registered_order_are_the_registered_rig() -> None:
+    assert rig_for_views(fifteen_file_rig().views, 90.0) == fifteen_file_rig()
+    assert rig_for_views(twenty_file_rig().views, 90.0) == twenty_file_rig()
+
+
+def test_views_are_matched_up_to_order_and_kept_in_it() -> None:
+    views = list(reversed(fifteen_file_rig().views))
+    rig = rig_for_views(views, 90.0)
+    assert rig.name == "pano-15"
+    assert rig.views == tuple(views)
+
+
+def test_a_writer_s_rounding_and_yaw_range_get_the_registered_values() -> None:
+    """A capture's floats are not the registry's; the result must be, or the bytes drift."""
+    views = [View(v.yaw - 360.0 if v.yaw > 180 else v.yaw, v.elevation + 4e-5)
+             for v in fifteen_file_rig().views]  # fmt: skip
+    rig = rig_for_views(views, 90.00004)
+    assert rig.views == fifteen_file_rig().views
+    assert views[12].yaw == -72.0 and rig.views[12] == View(288.0, 45.0)
+
+
+@pytest.mark.parametrize(
+    ("views", "fov"),
+    [
+        (fifteen_file_rig().views, 100.0),
+        (fifteen_file_rig().views[:6], 90.0),
+        ((*fifteen_file_rig().views[:14], fifteen_file_rig().views[0]), 90.0),
+        ((View(0, 0), View(90, 0), View(180, 0), View(-90, 0), View(0, 90), View(0, -90)), 90.0),
+    ],
+    ids=["wider", "too-few", "a-view-twice", "cubemap"],
+)
+def test_views_no_registered_rig_has_are_refused(views: tuple[View, ...], fov: float) -> None:
+    with pytest.raises(UnknownRigError, match="match no registered rig") as caught:
+        rig_for_views(views, fov)
+    assert "pano-15 (15 views at 90 deg)" in str(caught.value)
 
 
 @pytest.mark.parametrize("count", [2, 6, 12, 19, 21, 40])

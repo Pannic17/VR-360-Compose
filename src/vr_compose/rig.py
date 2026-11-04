@@ -9,22 +9,31 @@ the in-house upstream (VROpPanoramic) writes (ROADMAP P11).
 a set with a different camera count is a different rig and this module must refuse it
 rather than mis-stitch it. :func:`rig_for` looks up :data:`REGISTRY` and raises
 :class:`UnknownRigError` with instructions when the layout is not registered.
+:func:`rig_for_views` does the same for a rig a capture describes itself (its manifest,
+:mod:`vr_compose.manifest`).
 """
 
 from __future__ import annotations
 
 import collections
 import dataclasses
+from collections.abc import Sequence
 
 __all__ = [
+    "ANGLE_DECIMALS",
     "REGISTRY",
     "Rig",
     "UnknownRigError",
     "View",
     "fifteen_file_rig",
     "rig_for",
+    "rig_for_views",
     "twenty_file_rig",
 ]
+
+ANGLE_DECIMALS = 3
+"""Two angles from different writers agree when they round to the same thousandth of a
+degree; a capture's manifest carries them as floats."""
 
 
 class UnknownRigError(LookupError):
@@ -55,8 +64,9 @@ class Rig:
     needs_layout_check: bool = False
     """True when contiguous numbering does not prove the layout. A 15-file set numbered
     1..15 looks exactly like a 20-file set whose last five directories went missing, and
-    read as the 15-file rig that set is mis-stitched. Only the pixels can tell them apart
-    (ROADMAP P11b's layout gate); until that exists the run says the layout is unverified."""
+    read as the 15-file rig that set is mis-stitched. The capture's own manifest tells them
+    apart (a rig built from one is False), and without one only the pixels can (ROADMAP
+    P11b's layout gate)."""
 
     def __post_init__(self) -> None:
         if len(self.views) < 2:
@@ -177,3 +187,36 @@ def rig_for(file_count: int) -> Rig:
             "Solve the layout with `tools/fit_rig.py` against a reference equirect, "
             "then add it to vr_compose.rig.REGISTRY."
         ) from None
+
+
+def _angle_key(view: View) -> tuple[float, float]:
+    return round(view.yaw, ANGLE_DECIMALS) % 360.0, round(view.elevation, ANGLE_DECIMALS)
+
+
+def rig_for_views(views: Sequence[View], fov_deg: float) -> Rig:
+    """The registered rig with these viewpoints, in the order given.
+
+    `views` must be a registered rig's views up to order -- each orientation as often,
+    yaw compared modulo 360 -- at that rig's field of view. The result carries the
+    registered rig's own values, so a capture listing them in the registered order is
+    that rig exactly and stitches to the same bytes. Anything else raises
+    :class:`UnknownRigError`: a rig is registered once it has been proved, and a capture
+    saying it is something else is not a reason to stitch it as something we know.
+    """
+    wanted = collections.Counter(_angle_key(view) for view in views)
+    fov = round(fov_deg, ANGLE_DECIMALS)
+    for rig in REGISTRY.values():
+        if round(rig.fov_deg, ANGLE_DECIMALS) != fov:
+            continue
+        if collections.Counter(_angle_key(view) for view in rig.views) != wanted:
+            continue
+        registered = {_angle_key(view): view for view in rig.views}
+        return dataclasses.replace(rig, views=tuple(registered[_angle_key(v)] for v in views))
+    known = ", ".join(
+        f"{rig.name} ({rig.file_count} views at {rig.fov_deg:g} deg)" for rig in REGISTRY.values()
+    )
+    raise UnknownRigError(
+        f"{len(views)} views at {fov_deg:g} deg match no registered rig (registered: {known}). "
+        "A rig is registered once it has been proved against a reference equirect "
+        "(`tools/fit_rig.py`); until then this capture cannot be stitched."
+    )

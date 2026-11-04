@@ -10,13 +10,14 @@ import pathlib
 import struct
 import zlib
 from collections.abc import Callable, Iterable
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 
-from vr_compose import projection
-from vr_compose.rig import Rig
+from vr_compose import manifest, projection
+from vr_compose.rig import Rig, View, fifteen_file_rig
 
 U8 = npt.NDArray[np.uint8]
 F32 = npt.NDArray[np.float32]
@@ -179,6 +180,50 @@ def make_source_tree(
             else:
                 path.write_bytes(encode_png(pixels))
     return root
+
+
+def manifest_document(
+    views: Iterable[View] | None = None,
+    *,
+    stem: str,
+    frames: tuple[int, ...],
+    size: int,
+    rate: tuple[int, int] = (30, 1),
+) -> dict[str, Any]:
+    """A finished VROpPanoramic manifest for a :func:`make_source_tree` capture written
+    with ``name_digits=2``: ``Camera01..`` in `views` order (the 15-file rig's by default)."""
+    views = fifteen_file_rig().views if views is None else views
+    return {
+        "schema": manifest.SCHEMA,
+        "schema_version": 1,
+        "state": "finished",
+        "rig": {
+            "type": "SectorGrid",
+            "coordinate_system": "unreal",
+            "orientation_reference": "world",
+            "views": [
+                {
+                    "directory": f"Camera{index:02d}",
+                    "pitch": view.elevation,
+                    "yaw": view.yaw,
+                    "roll": 0,
+                    "fov": 90,
+                    "written": {"count": len(frames), "first": frames[0], "last": frames[-1]},
+                }
+                for index, view in enumerate(views, start=1)
+            ],
+        },
+        "tiles": {
+            "width": size,
+            "height": size,
+            "format": "png",
+            "encoding": "srgb8",
+            "alpha": "opaque",
+            "stems": [stem],
+        },
+        "frames": {"rate": {"numerator": rate[0], "denominator": rate[1]}, "zero_pad": 4},
+        "producer": {"engine": "5.6"},
+    }
 
 
 def analytic_panorama(width: int, height: int) -> U8:

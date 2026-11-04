@@ -51,11 +51,12 @@ from PySide6.QtWidgets import (
 )
 
 from vr_compose import __version__, encode, layout, pipeline
+from vr_compose import manifest as manifest_mod
 from vr_compose import source as source_mod
 from vr_compose.audio import AUDIO_EXTENSIONS
 from vr_compose.device import GUI_DEVICE
 from vr_compose.harmonise import DEFAULT_HARMONISE
-from vr_compose.rig import UnknownRigError, rig_for
+from vr_compose.rig import UnknownRigError
 from vr_compose.stitch import (
     BIT_DEPTHS,
     DEFAULT_FEATHER_POWER,
@@ -290,7 +291,9 @@ class ComposeWindow(QMainWindow):
             self.progress_detail.setText("—")
             return
         try:
-            rig = rig_for(chosen.camera_count)
+            choice = manifest_mod.choose_rig(chosen)
+            rig = choice.rig
+            self._report_manifest(choice)
             tile = chosen.tile_size
             native = rig.native_width(tile) if tile else 0
             frames = chosen.frames
@@ -318,6 +321,29 @@ class ComposeWindow(QMainWindow):
             self.log(f"装配不认识：{exc}")
             self.start_button.setEnabled(False)
             self.set_status("fail", "装配未登记")
+
+    def _report_manifest(self, choice: manifest_mod.RigChoice) -> None:
+        """Say what the capture's manifest decided, and take its frame rate.
+
+        The command always carries `--fps` from the combo, so the CLI's "default to the
+        manifest's rate" has to happen here: a 60 fps capture left at the combo's 30
+        would play at half speed.
+        """
+        if choice.set_aside is not None:
+            self.log(f"清单没用上（{choice.set_aside}），按目录数认装配，布局门照常核对。")
+            return
+        rate = choice.rate
+        if rate is None:
+            return
+        shown = manifest_mod.describe_rate(rate)
+        self.log(f"装配按清单认：{choice.rig.name}，采集 {shown} fps，不跑布局门。")
+        if rate in (30, 60):
+            self.fps_combo.setCurrentText(str(int(rate)))
+        else:
+            self.log(
+                f"采集是 {shown} fps，交付只有 30 / 60："
+                "按「帧率」里选的出片，播放速度会和采集时不同。"
+            )
 
     @Slot()
     def _mode_changed(self, _checked: bool = False) -> None:
