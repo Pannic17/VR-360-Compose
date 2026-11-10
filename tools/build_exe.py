@@ -8,7 +8,7 @@ needs ends up in it here rather than in someone's memory.
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --gpu        # the folder, carrying CUDA
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --gpu system --onefile  # one file, needs CUDA
     python tools/build_exe.py --skip-build                        # re-stage only
-    python tools/build_exe.py --smoke --source E:/22              # + check what was built
+    python tools/build_exe.py --smoke --source <a capture>        # + check what was built
 
 **The smoke check is off by default** (user's instruction, 2026-09-08): a packaging or
 documentation run should build the thing and stop. Turn it on with `--smoke` while
@@ -33,7 +33,8 @@ and extraction happens before any of this project's code could cache anything.
 
 `--smoke` checks **what was built** rather than the source tree: a version query and,
 given `--source`, a two-frame render whose output is compared byte for byte against the
-same render from source. A mismatch fails the build.
+same render from source. A mismatch fails the build. The two frames come from the source
+(`smoke_frames`), so any capture will do.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+import itertools
 import os
 import pathlib
 import shutil
@@ -209,6 +211,27 @@ def digest(directory: pathlib.Path) -> list[str]:
     ]
 
 
+def smoke_frames(source: pathlib.Path) -> tuple[str, str]:
+    """The stem and two frames of `source` for the render check, as `--stem` and `--frames` want.
+
+    The first source set with no problems, and its first two consecutive frames every camera
+    holds -- or its first two frames when none are consecutive, since a comma list selects
+    exactly those. Read from the source, so the check runs on whatever capture is at hand.
+    """
+    from vr_compose.source import scan  # only the render check needs the package
+
+    for found in scan(source):
+        frames = found.frames
+        if found.problems or len(frames) < 2:
+            continue
+        pair = next(
+            ((a, b) for a, b in itertools.pairwise(frames) if b == a + 1),
+            (frames[0], frames[1]),
+        )
+        return found.stem, f"{pair[0]},{pair[1]}"
+    raise SystemExit(f"{source} holds no source set with two frames shared by every camera")
+
+
 def smoke(layout: Layout, source: pathlib.Path | None) -> None:
     """Exercise the built executable, not the source tree.
 
@@ -236,13 +259,15 @@ def smoke(layout: Layout, source: pathlib.Path | None) -> None:
         print("    (no --source given, skipping the render check)")
         return
 
+    stem, frames = smoke_frames(source)
+    print(f"    render check: stem {stem!r}, frames {frames}")
     for label, target in (("packaged", DIST / "smoke_exe"), ("source", DIST / "smoke_src")):
         shutil.rmtree(target, ignore_errors=True)
         command = [str(exe)] if label == "packaged" else [sys.executable, str(ROOT / "main_ui.py")]
         started = time.time()
         result = run(
             [*command, "--source", str(source), "sequence", "--out-format", "png",
-             "--frames", "1656-1657", "--sampler", "nearest", "--out", str(target),
+             "--stem", stem, "--frames", frames, "--sampler", "nearest", "--out", str(target),
              "--no-bar"],
             capture_output=True,
         )  # fmt: skip
