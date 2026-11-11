@@ -536,3 +536,80 @@ def test_frame_on_cuda_writes_the_cpu_bytes(
     assert "warp       : cuda" in capsys.readouterr().out
     assert main([*common, str(tmp_path / "cpu.png")]) == 0
     assert (tmp_path / "cuda.png").read_bytes() == (tmp_path / "cpu.png").read_bytes()
+
+
+def test_interpolation_doubles_the_capture_s_rate_and_nothing_else() -> None:
+    """P16: `--interpolate 2x` delivers at twice the capture's rate. `--fps` may agree
+    with that or stay out of it; a capture that is already 60 fps has nowhere to go."""
+    import fractions
+
+    from vr_compose.cli import _interpolated_fps
+
+    fps, line = _interpolated_fps(None, None)
+    assert fps == 60 and "interpolated 2x from the capture's 30 (no manifest" in line
+    fps, line = _interpolated_fps(60, fractions.Fraction(30))
+    assert fps == 60 and "manifest frames.rate" in line
+    with pytest.raises(SystemExit, match="--fps 30 contradicts it"):
+        _interpolated_fps(30, None)
+    with pytest.raises(SystemExit, match="the capture is 60 fps: there is no 120 fps delivery"):
+        _interpolated_fps(None, fractions.Fraction(60))
+    with pytest.raises(SystemExit, match=r"the capture is 29.97 fps"):
+        _interpolated_fps(None, fractions.Fraction(30000, 1001))
+
+
+def test_the_interpolation_switch_reaches_the_job_and_is_off_by_default(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import pipeline
+
+    _png_source(tmp_path / "src")
+    seen: list[pipeline.SequenceJob] = []
+
+    def capture(job: pipeline.SequenceJob, **_kwargs: object) -> None:
+        seen.append(job)
+        raise pipeline.Cancelled("stopped by the test")
+
+    monkeypatch.setattr(pipeline, "run_sequence", capture)
+    base = ["--source", str(tmp_path / "src"), "sequence", "--no-bar"]
+    for extra in ([], ["--interpolate", "off"], ["--interpolate", "2x"]):
+        assert main([*base, *extra]) == 130
+    assert [(job.interpolate, job.spec.fps, job.spec.gop) for job in seen] == [
+        ("off", 30, 60),
+        ("off", 30, 60),
+        ("2x", 60, 120),
+    ]
+    with pytest.raises(SystemExit, match="--fps 30 contradicts it"):
+        main([*base, "--interpolate", "2x", "--fps", "30"])
+
+
+def test_interpolation_is_refused_for_masters(tmp_path: pathlib.Path) -> None:
+    """A master is the frames that were rendered, losslessly; a synthesised frame is neither."""
+    _png_source(tmp_path / "src")
+    with pytest.raises(SystemExit) as caught:
+        main(
+            ["--source", str(tmp_path / "src"), "sequence", "--out-format", "png",
+             "--interpolate", "2x", "--no-bar"]
+        )  # fmt: skip
+    assert "--interpolate only apply to --out-format mp4" in str(caught.value)
+
+
+@pytest.mark.skipif(encode_tools() is None, reason="ffmpeg not available")
+def test_a_run_without_the_interpolator_warns_and_delivers_the_capture_s_rate(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vr_compose import interpolate
+
+    monkeypatch.setattr(interpolate, "find", lambda explicit=None: None)
+    _png_source(tmp_path / "src")
+    code = main(
+        ["--source", str(tmp_path / "src"), "sequence", "--size", "4k", "--stitch-at",
+         "delivery", "--frames", "1-2", "--interpolate", "2x",
+         "--out", str(tmp_path / "out.mp4"), "--no-bar"]
+    )  # fmt: skip
+    printed = capsys.readouterr().out
+    assert code == 0, printed
+    assert "interpolate: 2x -- 2 stitched frame(s) kept" in printed, "what was asked for"
+    assert "WARNING    : frame interpolation requested (--interpolate 2x)" in printed
+    assert "delivering the stitched frames at 30 fps without it" in printed
+    assert "done       : 2 frames ->" in printed, "and not twice as many"
+    assert "conformance: OK" in printed

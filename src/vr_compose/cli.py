@@ -35,6 +35,7 @@ from tqdm import tqdm
 from vr_compose import __version__, encode, harmonise, io, layout, pipeline, spherical, verify
 from vr_compose import audio as audio_mod
 from vr_compose import device as device_mod
+from vr_compose import interpolate as interpolate_mod
 from vr_compose import manifest as manifest_mod
 from vr_compose import source as source_mod
 from vr_compose.rig import Rig, UnknownRigError
@@ -210,6 +211,34 @@ def _delivery_fps(requested: int | None, rate: fractions.Fraction | None) -> tup
             f"at {float(requested / rate):.2f}x its speed"
         )
     return requested, None
+
+
+def _interpolated_fps(requested: int | None, rate: fractions.Fraction | None) -> tuple[int, str]:
+    """The delivery rate of an `--interpolate 2x` job, and the line a report adds about it.
+
+    Twice the capture's rate -- the manifest's, or the default without one -- and it has
+    to be a rate a delivery can have, which today means 30 doubled to 60. `--fps` is not
+    needed and may only agree: any other value would ask for a playback speed change on
+    top of the interpolation, and that is two decisions hidden in one number.
+    """
+    capture = rate if rate is not None else fractions.Fraction(DEFAULT_FPS)
+    doubled = capture * 2
+    shown = manifest_mod.describe_rate(capture)
+    if doubled not in FPS_CHOICES:
+        raise SystemExit(
+            f"--interpolate 2x doubles the capture's frame rate, and the capture is {shown} "
+            f"fps: there is no {manifest_mod.describe_rate(doubled)} fps delivery "
+            f"({' or '.join(str(fps) for fps in FPS_CHOICES)}). Leave --interpolate out."
+        )
+    if requested is not None and requested != doubled:
+        raise SystemExit(
+            f"--interpolate 2x delivers at {int(doubled)} fps, twice the capture's {shown}; "
+            f"--fps {requested} contradicts it. Leave --fps out."
+        )
+    origin = "manifest frames.rate" if rate is not None else "no manifest, the default"
+    return int(doubled), (
+        f"fps        : {int(doubled)}, interpolated 2x from the capture's {shown} ({origin})"
+    )
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
@@ -424,6 +453,7 @@ DELIVERY_ONLY = (
     "audio_bitrate",
     "audio_rate",
     "audio_channels",
+    "interpolate",
 )
 """`sequence` options that only mean something when an encoder is involved."""
 
@@ -672,7 +702,11 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     )
     if args.audio is None:
         _reject_inapplicable(args, AUDIO_FORMAT, "only apply with --audio.")
-    fps, fps_line = _delivery_fps(args.fps, choice.rate)
+    fps_line: str | None
+    if args.interpolate == "2x":
+        fps, fps_line = _interpolated_fps(args.fps, choice.rate)
+    else:
+        fps, fps_line = _delivery_fps(args.fps, choice.rate)
 
     try:
         spec = encode.EncodeSpec.for_size(
@@ -716,6 +750,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
                 sample_rate=args.audio_rate,
                 channels=args.audio_channels,
             ),
+            interpolate=args.interpolate,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
@@ -736,7 +771,21 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         f"{len(job.segments())} segment(s) of up to {job.segment_frames}"
     )
     report.say(f"sampler    : {args.sampler}")
-    report.say(f"encode     : {spec.describe()}")
+    if job.frame_factor == 2:
+        # The encoder is handed delivery-size frames here: a larger master is brought down
+        # before the interpolator sees it, so "lanczos downsample" is not the encoder's.
+        report.say(f"encode     : {dataclasses.replace(spec, master=None).describe()}")
+        resampled = (
+            f", stitched at {spec.master_width}x{spec.master_height} and brought down first"
+            if spec.downsamples
+            else ""
+        )
+        report.say(
+            f"interpolate: 2x -- {len(frames)} stitched frame(s) kept, one synthesised "
+            f"between each pair, {2 * len(frames)} delivered{resampled}"
+        )
+    else:
+        report.say(f"encode     : {spec.describe()}")
     if job.audio is not None:
         report.say(f"audio      : {job.audio.path} -> {job.audio.describe()}")
     report.say(f"output     : {job.output}")
@@ -826,7 +875,11 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         bar.close()
 
     size_mib = summary.output.stat().st_size / 2**20
-    report.say(f"\ndone       : {summary.frames} frames -> {summary.output} ({size_mib:.0f} MiB)")
+    delivered = f" ({summary.stream.frames} delivered)" if summary.interpolation else ""
+    report.say(
+        f"\ndone       : {summary.frames} frames{delivered} -> {summary.output} "
+        f"({size_mib:.0f} MiB)"
+    )
     if summary.encoded:
         speedup = pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME / summary.seconds_per_frame
         report.say(
@@ -863,6 +916,12 @@ def cmd_sequence(args: argparse.Namespace) -> int:
             f"{stream.audio_sample_rate} Hz {stream.audio_channels} ch "
             f"{stream.audio_duration:.3f} s -- {summary.audio.describe()}"
         )
+    if summary.interpolation:
+        cuts = f", {summary.cuts} cut(s) repeated instead" if summary.cuts else ""
+        report.say(
+            f"interpolate: {summary.synthesised} frame(s) synthesised by "
+            f"{summary.interpolation}{cuts}"
+        )
     for warning in summary.warnings:
         report.say(f"WARNING    : {warning}")
     report.event(
@@ -870,6 +929,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         ok=not summary.problems,
         output=str(summary.output),
         frames=summary.frames,
+        delivered=stream.frames,
+        interpolation=summary.interpolation or None,
         encoded=summary.encoded,
         seconds_per_frame=round(summary.seconds_per_frame, 3),
         size_bytes=summary.output.stat().st_size,
@@ -1024,6 +1085,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"delivery frame rate. Default: the capture's own, from its manifest, or "
         f"{DEFAULT_FPS} without one. A rate other than the manifest's is used, with a "
         "warning that the video plays faster or slower than it was captured",
+    )
+    sequence.add_argument(
+        "--interpolate",
+        choices=interpolate_mod.INTERPOLATIONS,
+        default=interpolate_mod.DEFAULT_INTERPOLATION,
+        help="'2x' keeps every stitched frame and synthesises one between each pair, so a "
+        "30 fps capture is delivered at 60 fps in the same running time. Needs "
+        f"rife-ncnn-vulkan beside the program (a `{interpolate_mod.TOOL_DIRECTORY}` folder, "
+        f"or {interpolate_mod.TOOL_ENVIRONMENT}); without it the run warns and delivers "
+        "at the capture's rate. 'off' (default) delivers the rendered frames "
+        "(--out-format mp4 only)",
     )
     sequence.add_argument("--preset", default="medium", help="x264/x265 preset; never ultrafast")
     sequence.add_argument(

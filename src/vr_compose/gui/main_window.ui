@@ -314,6 +314,12 @@
             <property name="checked"><bool>true</bool></property>
            </widget>
           </item>
+          <item row="6" column="0" colspan="6">
+           <widget class="QCheckBox" name="interpolateCheckBox">
+            <property name="text"><string>插帧到 60 fps：30 fps 的采集每两帧之间补一帧，片长不变（需要程序旁边有 rife-ncnn-vulkan）</string></property>
+            <property name="toolTip"><string>只渲 30 fps、交付 60 fps：每一张拼好的帧原样保留，相邻两帧之间由 RIFE 补一帧。头显盲测里和真渲 60 fps 一样好，都远好于 30 fps。相机脚下很近的地面、擦身而过的物体补不好，会糊。要把 rife-ncnn-vulkan 文件夹放在程序旁边；没有的话照常按采集的帧率出片，并给出警告。只对视频模式、30 fps 的采集起作用，会多花时间。</string></property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>

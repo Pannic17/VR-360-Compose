@@ -35,6 +35,12 @@ desktop.ini
 *.mp4.part
 *.segments/
 
+# External tools the program runs as subprocesses, kept beside the source tree so a run
+# from source finds them the way the packaged program does. Not committed: they are other
+# people's binaries (bin/rife-ncnn-vulkan is the interpolator, ROADMAP P16), and the
+# release build copies them into dist/ from here.
+/bin/
+
 # Generated from docs/使用说明.md by tools/manual_pdf.py, and staged into dist/ by the
 # release build. Not committed: a checked-in PDF is one that can be a release behind the
 # Markdown it was made from, and nothing here reads it that the Markdown cannot serve.

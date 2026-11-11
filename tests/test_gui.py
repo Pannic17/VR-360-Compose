@@ -799,3 +799,55 @@ def test_the_finish_line_says_what_happened_to_the_audio(qt_app: QApplication) -
         assert "音频：a.wav -> AAC-LC 48 kHz stereo 192 kbps" in window.log_edit.toPlainText()
     finally:
         window.close()
+
+
+def test_interpolation_is_one_tick_and_takes_the_frame_rate_with_it(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    """P16: unticked, the argv is what it has always been. Ticked, it says `--interpolate
+    2x` and no `--fps` -- the CLI takes twice the capture's rate -- and the combo shows
+    60 without being a choice. Frame mode greys it out, as the CLI refuses it there."""
+    _source(tmp_path / "src")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "src"))
+        window.discover()
+        window.video_radio.setChecked(True)
+        assert not window.interpolate_check.isChecked() and window.interpolate_check.isEnabled()
+        argv = window.build_command()
+        assert argv is not None and "--interpolate" not in argv
+        assert argv[argv.index("--fps") + 1] == "30"
+
+        window.interpolate_check.setChecked(True)
+        assert window.fps_combo.currentText() == "60" and not window.fps_combo.isEnabled()
+        argv = window.build_command()
+        assert argv is not None and argv[argv.index("--interpolate") + 1] == "2x"
+        assert "--fps" not in argv, "the CLI derives it; sending one could only contradict"
+
+        window.frames_radio.setChecked(True)
+        assert not window.interpolate_check.isEnabled()
+        argv = window.build_command()
+        assert argv is not None and "--interpolate" not in argv and "--out-format" in argv
+
+        window.video_radio.setChecked(True)
+        window.interpolate_check.setChecked(False)
+        assert window.fps_combo.currentText() == "30" and window.fps_combo.isEnabled(), (
+            "the rate chosen before comes back"
+        )
+    finally:
+        window.close()
+
+
+def test_the_finish_line_says_what_interpolation_delivered(qt_app: QApplication) -> None:
+    window = ComposeWindow()
+    try:
+        window._handle_event(
+            {"event": "done", "ok": True, "output": "x.mp4", "size_bytes": 0,
+             "seconds_per_frame": 2.0, "problems": [], "warnings": [],
+             "frames": 600, "delivered": 1200,
+             "interpolation": "rife-ncnn-vulkan rife-v4.6 (D:/tools/rife-ncnn-vulkan)"}
+        )  # fmt: skip
+        text = window.log_edit.toPlainText()
+        assert "插帧：600 帧拼接，交付 1200 帧（rife-ncnn-vulkan rife-v4.6" in text
+    finally:
+        window.close()

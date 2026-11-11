@@ -1,4 +1,4 @@
-"""Build the distributable: PyInstaller, then stage ffmpeg and the manual, then check it.
+"""Build the distributable: PyInstaller, then stage ffmpeg, the interpolator and the manual.
 
 ROADMAP P8. The build has to be repeatable by one command, so everything the product
 needs ends up in it here rather than in someone's memory.
@@ -7,12 +7,22 @@ needs ends up in it here rather than in someone's memory.
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --onefile    # one executable
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --gpu        # the folder, carrying CUDA
     python tools/build_exe.py --ffmpeg C:/ffmpeg/bin --gpu system --onefile  # one file, needs CUDA
+    python tools/build_exe.py --rife D:/tools/rife-ncnn-vulkan    # the interpolator from there
+    python tools/build_exe.py --no-rife                           # a package without it
     python tools/build_exe.py --skip-build                        # re-stage only
     python tools/build_exe.py --smoke --source <a capture>        # + check what was built
 
 **The smoke check is off by default** (user's instruction, 2026-09-08): a packaging or
 documentation run should build the thing and stop. Turn it on with `--smoke` while
 developing, which is where a failing check is worth the minutes it costs.
+
+**The package carries the interpolator** (user's decision, 2026-11-11, ROADMAP P16):
+rife-ncnn-vulkan and its `rife-v4.6` model, 17 MiB, as a `rife-ncnn-vulkan` folder beside
+the executable or inside a onefile bundle -- the two places `interpolate.find` looks. It
+is taken from `--rife`, or from wherever a run from source finds it (`bin/rife-ncnn-vulkan`
+in this tree, or `VR_COMPOSE_RIFE`). A build that cannot find it stops, as one without
+ffmpeg does, because a package that silently lacks it delivers 30 fps to everyone who
+ticks the box; `--no-rife` builds one without it on purpose.
 
 **Two shapes, and the difference is where ffmpeg goes.**
 
@@ -55,6 +65,12 @@ SPEC = ROOT / "VR-Compose.spec"
 DIST = ROOT / "dist"
 MANUAL = ROOT / "docs" / "使用说明.md"
 TOOLS = ("ffmpeg.exe", "ffprobe.exe")
+RIFE_FOLDER = "rife-ncnn-vulkan"
+"""The interpolator's folder in a package -- the name `vr_compose.interpolate` looks for."""
+RIFE_EXE = "rife-ncnn-vulkan.exe"
+RIFE_MODEL = "rife-v4.6"
+RIFE_PAYLOAD = ROOT / "build" / RIFE_FOLDER
+"""Where the files that ship are gathered before the build, so both shapes carry one list."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -111,6 +127,52 @@ def locate_tools(source: pathlib.Path | None) -> list[pathlib.Path]:
     return found
 
 
+def locate_rife(source: pathlib.Path | None) -> pathlib.Path:
+    """The interpolator's folder to ship: `source`, or where a run from source finds it."""
+    if source is None:
+        from vr_compose import interpolate  # only this lookup needs the package
+
+        found = interpolate.find()
+        if found is None:
+            raise SystemExit(
+                f"the interpolator was not found ({interpolate.MISSING}). Pass --rife with "
+                f"the folder holding {RIFE_EXE} and {RIFE_MODEL}/, or --no-rife to build a "
+                "package without frame interpolation."
+            )
+        return found.directory
+    if not (source / RIFE_EXE).is_file() or not (source / RIFE_MODEL).is_dir():
+        raise SystemExit(f"{source} does not hold {RIFE_EXE} and a {RIFE_MODEL} folder")
+    return source
+
+
+def rife_files(directory: pathlib.Path) -> list[tuple[pathlib.Path, str]]:
+    """`(file, subfolder)` for what ships: the executable, the libraries beside it, its
+    licence, and the one model the product uses.
+
+    The release it comes from carries eleven models and 448 MiB; the product runs one of
+    them. The licence goes along because the MIT terms ask for it in every copy.
+    """
+    files = [(directory / RIFE_EXE, "")]
+    files += [(library, "") for library in sorted(directory.glob("*.dll"))]
+    files += [(notice, "") for notice in (directory / "LICENSE",) if notice.is_file()]
+    files += [
+        (weight, RIFE_MODEL)
+        for weight in sorted((directory / RIFE_MODEL).iterdir())
+        if weight.is_file()
+    ]
+    return files
+
+
+def gather_rife(directory: pathlib.Path, payload: pathlib.Path = RIFE_PAYLOAD) -> pathlib.Path:
+    """Copy what ships into `payload`, laid out as it will sit in the package."""
+    shutil.rmtree(payload, ignore_errors=True)
+    for file, subfolder in rife_files(directory):
+        target = payload / subfolder
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file, target / file.name)
+    return payload
+
+
 def ensure_not_running(exe: pathlib.Path) -> None:
     """Refuse to build over a copy of the app that is open.
 
@@ -132,10 +194,21 @@ def ensure_not_running(exe: pathlib.Path) -> None:
         ) from None
 
 
-def build(layout: Layout, tools: list[pathlib.Path], gpu: str | None = None) -> None:
+def build(
+    layout: Layout,
+    tools: list[pathlib.Path],
+    gpu: str | None = None,
+    rife: pathlib.Path | None = None,
+) -> None:
     """Drive PyInstaller. The spec reads the shape out of the environment; see its docstring."""
     ensure_not_running(layout.exe)
     environment = dict(os.environ)
+    # Inside the bundle only for onefile, like ffmpeg: the folder build gets it copied in
+    # beside the executable afterwards, which is cheaper and does the same job.
+    if layout.onefile and rife is not None:
+        environment["VRC_RIFE_DIR"] = str(rife)
+    else:
+        environment.pop("VRC_RIFE_DIR", None)
     # Set both ways round, always: a stale VRC_GPU in someone's shell would otherwise
     # decide the shape of a build that never asked for it, and it is a 600 MB decision.
     if gpu:
@@ -178,6 +251,19 @@ def stage_ffmpeg(layout: Layout, tools: list[pathlib.Path]) -> None:
         target = layout.directory / tool.name
         print(f"    staging {tool} -> {target}", flush=True)
         shutil.copy2(tool, target)
+
+
+def stage_rife(layout: Layout, payload: pathlib.Path | None) -> None:
+    if payload is None:
+        print("    no interpolator (--no-rife): --interpolate 2x will warn and deliver 30 fps")
+        return
+    if layout.onefile:
+        print("    the interpolator is inside the executable (VRC_RIFE_DIR)", flush=True)
+        return
+    target = layout.directory / RIFE_FOLDER
+    shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(payload, target)
+    print(f"    staging {RIFE_FOLDER}/  {folder_size(target) / 2**20:.0f} MiB", flush=True)
 
 
 def stage_manual(layout: Layout) -> None:
@@ -322,7 +408,23 @@ def main(argv: list[str] | None = None) -> int:
         "instruction, 2026-09-08): packaging and documentation runs should just build",
     )
     parser.add_argument("--skip-build", action="store_true", help="re-stage only")
+    parser.add_argument(
+        "--rife",
+        type=pathlib.Path,
+        default=None,
+        help=f"folder holding {RIFE_EXE} and {RIFE_MODEL}/ to ship as the interpolator "
+        f"(default: where a run from source finds it -- bin/{RIFE_FOLDER}, or VR_COMPOSE_RIFE)",
+    )
+    parser.add_argument(
+        "--no-rife",
+        action="store_true",
+        help="build a package without the interpolator; --interpolate 2x then warns and "
+        "delivers at the capture's rate",
+    )
     args = parser.parse_args(argv)
+
+    if args.no_rife and args.rife is not None:
+        raise SystemExit("--rife and --no-rife contradict each other; pass one")
 
     if args.source is not None and not args.smoke:
         raise SystemExit(
@@ -342,14 +444,16 @@ def main(argv: list[str] | None = None) -> int:
 
     layout = Layout(onefile=args.onefile)
     tools = locate_tools(args.ffmpeg)
+    payload = None if args.no_rife else gather_rife(locate_rife(args.rife))
 
     if not args.skip_build:
-        build(layout, tools, gpu=args.gpu)
+        build(layout, tools, gpu=args.gpu, rife=payload)
     if not layout.exe.is_file():
         raise SystemExit(f"no executable at {layout.exe}; run without --skip-build first")
 
     print("staging:", flush=True)
     stage_ffmpeg(layout, tools)
+    stage_rife(layout, payload)
     stage_manual(layout)
     if args.smoke:
         print("smoke check:", flush=True)

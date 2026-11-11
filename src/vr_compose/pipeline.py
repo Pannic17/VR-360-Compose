@@ -48,6 +48,7 @@ import numpy.typing as npt
 from vr_compose import audio as audio_mod
 from vr_compose import device as device_mod
 from vr_compose import encode, exr, harmonise, io, layout, memory, verify
+from vr_compose import interpolate as interpolate_mod
 from vr_compose import spherical as spherical_mod
 from vr_compose.rig import Rig
 from vr_compose.source import SourceSet
@@ -102,6 +103,15 @@ WRITE_WORKERS = {"cpu": 1, "cuda": 4}
 On the CPU a second writer slows the warp (2.40 -> 2.52 s/frame at 8K, AGENTS.md section
 8, P3). On the GPU the warp is 0.06-0.14 s and the PNG encode is the whole cost: 1 -> 4
 writers took 8-bit masters from 1.26 to 0.51 s/frame and 16-bit from 4.68 to 1.54."""
+
+
+STAGING_WORKERS = 6
+"""Threads preparing the interpolator's input and reading its output back.
+
+Preparing an 8K frame from a 10240 master is about 1.3 s of Lanczos and a second of PNG
+encode, collecting one 0.4 s of decode, all with the GIL released. On the GPU a frame is
+stitched every 0.4 s, so it takes about six to keep the batch from waiting on them; done
+on the stitch loop itself they were 1.5 s of every 4.0 s frame (ROADMAP P16 step 3)."""
 
 
 GATES = ("on", "off")
@@ -288,6 +298,12 @@ class SequenceJob:
     Measured against the video before anything is stitched, and added by the join, so the
     segments stay video-only and resuming does not depend on it (ROADMAP P14,
     :mod:`vr_compose.audio`)."""
+    interpolate: str = interpolate_mod.DEFAULT_INTERPOLATION
+    """`2x`: every stitched frame is kept and one synthesised frame goes between each pair,
+    so `spec.fps` is twice the capture's rate and the delivery has twice the frames in the
+    same running time (ROADMAP P16, :mod:`vr_compose.interpolate`). `off` (default): the
+    delivery is the frames that were rendered. Needs the interpolator beside the program;
+    without it the run warns and delivers at the capture's rate."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -306,10 +322,26 @@ class SequenceJob:
             )
         if self.decode_workers is not None and self.decode_workers < 1:
             raise ValueError("decode_workers must be >= 1 (or None for the device's default)")
+        if self.interpolate not in interpolate_mod.INTERPOLATIONS:
+            raise ValueError(
+                f"interpolate must be one of {interpolate_mod.INTERPOLATIONS}, "
+                f"got {self.interpolate!r}"
+            )
+        if self.frame_factor == 2 and self.spec.fps % 2:
+            raise ValueError(
+                f"interpolation doubles the capture's rate, so the delivery rate must be "
+                f"even, got {self.spec.fps} fps"
+            )
+
+    @property
+    def frame_factor(self) -> int:
+        """Delivered frames per stitched frame: 2 when interpolating, otherwise 1."""
+        return 2 if self.interpolate == "2x" else 1
 
     @property
     def segment_frames(self) -> int:
-        return self.segment_gops * self.spec.gop
+        """Stitched frames per segment -- whole GOPs of the *delivery* either way."""
+        return self.segment_gops * self.spec.gop // self.frame_factor
 
     @property
     def segment_dir(self) -> pathlib.Path:
@@ -324,13 +356,30 @@ class SequenceJob:
         ]
 
     def segment_path(self, index: int, frames: tuple[int, ...]) -> pathlib.Path:
-        return self.segment_dir / f"{self.output.stem}.{index:04d}.{frames[0]}-{frames[-1]}.mp4"
+        # An interpolated segment holds other frames than a plain one over the same range,
+        # so the name says which it is and a resumed run cannot take one for the other.
+        marker = ".x2" if self.frame_factor == 2 else ""
+        name = f"{self.output.stem}.{index:04d}.{frames[0]}-{frames[-1]}{marker}.mp4"
+        return self.segment_dir / name
 
     def estimated_output_bytes(self) -> int:
-        seconds = len(self.frames) / self.spec.fps
+        seconds = len(self.frames) * self.frame_factor / self.spec.fps
         video = self.spec.bitrate_kbps * 1000 / 8 * seconds
         # segments and the joined file coexist until cleanup, plus VBV overshoot headroom
         return int(video * 2 * 1.2)
+
+    def estimated_staging_bytes(self) -> int:
+        """The temporary PNGs one interpolation batch leaves on disk; 0 without it.
+
+        The padded inputs once and the tool's output twice over -- it writes every input
+        again next to the frame it made. About 1.75 bytes a pixel measured at zlib 1 on
+        the review sequence; 2 leaves room.
+        """
+        if self.frame_factor == 1:
+            return 0
+        wrap, pole = interpolate_mod.padding(self.spec.width)
+        pixels = (self.spec.width + 2 * wrap) * (self.spec.height + 2 * pole)
+        return int(pixels * 2.0 * 3 * (interpolate_mod.BATCH + 1))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -375,14 +424,20 @@ class StageTimes:
     gate: float = 0.0
     write: float = 0.0
     frames: int = 0
+    interpolate: float = 0.0
+    """With interpolation only: resampling and staging the batch, the interpolator itself,
+    and reading its frames back -- everything the plain path does not do."""
 
     def report(self) -> str:
         n = max(self.frames, 1)
-        return (
+        line = (
             f"per frame: wait-for-decode {self.decode_wait / n:.2f} s "
             f"(incl. harmonise {self.harmonise / n:.2f} s in the prefetch thread), "
             f"warp {self.warp / n:.2f} s, gate {self.gate / n:.2f} s, write {self.write / n:.2f} s"
         )
+        if self.interpolate:
+            line += f", interpolate {self.interpolate / n:.2f} s"
+        return line
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -408,6 +463,14 @@ class Summary:
     """The layout gate's measurement, when it ran (a 15-file rig with the gate on)."""
     audio: audio_mod.AudioPlan | None = None
     """How the audio file was fitted to the video, when one was given (ROADMAP P14)."""
+    interpolation: str = ""
+    """The interpolator that ran, when one did (ROADMAP P16). Empty for a plain delivery,
+    and for one that asked for interpolation and fell back -- `warnings` says why."""
+    synthesised: int = 0
+    """Frames the interpolator contributed. `frames` and `encoded` count stitched frames
+    throughout; the file holds `stream.frames`."""
+    cuts: int = 0
+    """Pairs judged to be a cut, where the earlier frame was repeated instead."""
 
     @property
     def seconds_per_frame(self) -> float:
@@ -629,11 +692,15 @@ def _check_disk(job: SequenceJob) -> None:
     target = job.output.parent
     target.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(target).free
-    need = job.estimated_output_bytes()
+    staging = job.estimated_staging_bytes()
+    need = job.estimated_output_bytes() + staging
     if free < need:
+        parts = "segments + joined file + headroom"
+        if staging:
+            parts += f" + {staging / 2**30:.1f} GiB of interpolation frames at a time"
         raise RuntimeError(
             f"{target} has {free / 2**30:.1f} GiB free; this job needs about "
-            f"{need / 2**30:.1f} GiB (segments + joined file + headroom). Refusing to start."
+            f"{need / 2**30:.1f} GiB ({parts}). Refusing to start."
         )
 
 
@@ -646,6 +713,280 @@ def _segment_is_complete(tools: encode.Tools, path: pathlib.Path, expected_frame
         return False
 
 
+def _place_interpolation(
+    job: SequenceJob,
+    supplied: interpolate_mod.Interpolator | None,
+    say: Callable[[str], None],
+    warnings: list[str],
+) -> tuple[SequenceJob, interpolate_mod.Interpolator | None]:
+    """The interpolator a `2x` job will use -- or the job it becomes without one.
+
+    The same rule as the GPU (:func:`_place_plan`): asking for something this machine
+    cannot do is a warning and a run, never a refusal. Without the tool, or with a tool
+    that does not start here, the job delivers the stitched frames at the capture's own
+    rate -- half of `spec.fps` -- which is the delivery it would have been without the
+    switch. Repeating frames to fill a 60 fps file would be the one wrong answer: a file
+    that claims the smoothness it does not have.
+    """
+    if job.frame_factor == 1:
+        return job, None
+    if supplied is not None:
+        say(f"interpolating 2x with {supplied.describe}")
+        return job, supplied
+    found = interpolate_mod.find()
+    if found is None:
+        reason = interpolate_mod.MISSING
+    else:
+        try:
+            found.check()
+        except interpolate_mod.InterpolationError as error:
+            reason = f"{found.describe} does not run on this machine [{error}]"
+        else:
+            say(f"interpolating 2x with {found.describe}")
+            return job, found
+    return _without_interpolation(job, reason, say, warnings), None
+
+
+def _without_interpolation(
+    job: SequenceJob, reason: str, say: Callable[[str], None], warnings: list[str]
+) -> SequenceJob:
+    """The plain job a `2x` job falls back to, with the warning that says why."""
+    rate = job.spec.fps // 2
+    warning = (
+        f"frame interpolation requested (--interpolate 2x) but {reason}; delivering the "
+        f"stitched frames at {rate} fps without it."
+    )
+    warnings.append(warning)
+    say(f"WARNING: {warning}")
+    return dataclasses.replace(job, interpolate="off", spec=dataclasses.replace(job.spec, fps=rate))
+
+
+def _rehearse_interpolation(
+    job: SequenceJob,
+    interpolator: interpolate_mod.Interpolator | None,
+    say: Callable[[str], None],
+    warnings: list[str],
+) -> tuple[SequenceJob, interpolate_mod.Interpolator | None]:
+    """Does the card still have room, once the warp plan is on it? The plain job if not.
+
+    The tool shares the card with the warp, and with whatever else is running. Short of
+    memory it does not fail: it returns pictures that are not the frame in between, and
+    exits with 0. Two questions are asked before anything is stitched, with the plan
+    already resident:
+
+    * what the card has free against what the job's size takes -- the one that catches
+      it. Measured with 8 GiB held by another process: a single trial pair still came
+      back right (in 37 s instead of 6), and the run went wrong at its eighth pair;
+    * one trial pair at the job's size, held against the two frames it was made from --
+      for a tool that starts and cannot do this size at all.
+
+    Neither is the last word: every frame is checked again before it is delivered
+    (:class:`_Doubler`). Only the real tool is asked -- a stand-in has no card to fill.
+    """
+    if not isinstance(interpolator, interpolate_mod.Rife):
+        return job, interpolator
+    width, height = job.spec.width, job.spec.height
+    free = interpolate_mod.free_video_memory()
+    need = interpolate_mod.video_memory_needed(width, height)
+    if free is not None and free < need:
+        reason = (
+            f"the video card has {free / 1e9:.1f} GB free and interpolating at "
+            f"{width}x{height} takes about {need / 1e9:.1f} GB (the warp and other programs "
+            f"hold the rest; close what else uses the GPU)"
+        )
+        return _without_interpolation(job, reason, say, warnings), None
+    started = time.time()
+    try:
+        interpolator.rehearse(width, height)
+    except interpolate_mod.InterpolationError as error:
+        reason = f"{interpolator.describe} cannot do this job here [{error}]"
+        return _without_interpolation(job, reason, say, warnings), None
+    say(f"interpolation rehearsed at {job.spec.width}x{job.spec.height} in "
+        f"{time.time() - started:.1f} s")  # fmt: skip
+    return job, interpolator
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Pair:
+    """One stitched frame and the frame that follows it in an interpolated delivery."""
+
+    frame: int
+    kept: U8
+    second: U8
+    """Synthesised, or `kept` again at the end of the job and across a cut."""
+    waited: float
+    harmonise: float
+    warp: float
+    gate: float
+    interpolate: float
+
+
+class _Doubler:
+    """Feeds an interpolated delivery: stitches in batches, hands each batch to the tool.
+
+    A synthesised frame needs the stitched frame on either side of it, so the last frame
+    of a batch waits for the first of the next: that frame is stitched one batch early and
+    carried over, which is also what makes a segment independent of the ones around it --
+    resumed alone, it stitches its own look-ahead and gets the same pair.
+    """
+
+    def __init__(
+        self,
+        job: SequenceJob,
+        interpolator: interpolate_mod.Interpolator,
+        warper: Warper,
+        prepare: Callable[[int], Prepared],
+        prefetch: concurrent.futures.ThreadPoolExecutor,
+        pool: concurrent.futures.ThreadPoolExecutor,
+        *,
+        stop: threading.Event,
+        check: Callable[[], None],
+        judge: Callable[[verify.Agreement, int, harmonise.Corrections | None], None],
+        say: Callable[[str], None],
+    ) -> None:
+        self.job = job
+        self.interpolator = interpolator
+        self.synthesised = 0
+        self.cuts = 0
+        self._warper = warper
+        self._prepare = prepare
+        self._prefetch = prefetch
+        self._pool = pool
+        self._stop = stop
+        self._check = check
+        self._judge = judge
+        self._say = say
+        self._position = {frame: index for index, frame in enumerate(job.frames)}
+        self._work = job.segment_dir / "interpolate"
+        self._carried: dict[int, U8] = {}
+        self._timings: dict[int, tuple[float, float, float, float]] = {}
+        self._gated: set[int] = set()
+
+    def segment(self, frames: Sequence[int]) -> Iterable[_Pair]:
+        for batch in itertools.batched(frames, interpolate_mod.BATCH, strict=False):
+            yield from self._batch(batch)
+
+    def _stitch(self, frame: int, prepared: Prepared, waited: float) -> U8:
+        """One frame as stitched; the gate samples it by its place in the job."""
+        job = self.job
+        tiles, corrections, harmonise_seconds = prepared
+        due = self._position[frame] % job.stats_every == 0 and frame not in self._gated
+        image, report, warp_seconds, gate_seconds = _stitch_one(
+            self._warper,
+            tiles,
+            threads=job.warp_threads,
+            gate=job.gate == "on" and due,
+            corrections=corrections,
+        )
+        if report is not None:
+            self._gated.add(frame)
+            self._judge(report, frame, corrections)
+        self._timings[frame] = (waited, harmonise_seconds, warp_seconds, gate_seconds)
+        return _delivery_frame(image)
+
+    def _batch(self, batch: Sequence[int]) -> Iterable[_Pair]:
+        job = self.job
+        width, height = job.spec.width, job.spec.height
+        after = self._position[batch[-1]] + 1
+        following = job.frames[after] if after < len(job.frames) else None
+        wanted = [*batch] if following is None else [*batch, following]
+        work = self._work / f"{batch[0]}-{batch[-1]}"
+        shutil.rmtree(work, ignore_errors=True)
+        staged = work / "in"
+        staged.mkdir(parents=True)
+        try:
+            # Bringing a master down to the delivery size and writing the PNG the tool reads
+            # cost over two seconds a frame at 8K between them, so both happen on the pool
+            # while the next frame is stitched; the frame comes back at the delivery size.
+            carried = {frame: image for frame, image in self._carried.items() if frame in wanted}
+            self._carried = {}
+            staging = {
+                frame: self._pool.submit(
+                    interpolate_mod.prepare,
+                    image,
+                    staged / f"{wanted.index(frame):06d}.png",
+                    width,
+                    height,
+                )
+                for frame, image in carried.items()
+            }
+            missing = [frame for frame in wanted if frame not in carried]
+            for frame, prepared, waited in _prefetch_tiles(self._prefetch, self._prepare, missing):
+                self._check()
+                staging[frame] = self._pool.submit(
+                    interpolate_mod.prepare,
+                    self._stitch(frame, prepared, waited),
+                    staged / f"{wanted.index(frame):06d}.png",
+                    width,
+                    height,
+                )
+            tick = time.time()
+            held = {frame: future.result() for frame, future in staging.items()}
+            made: list[pathlib.Path] = []
+            if len(wanted) > 1:
+                try:
+                    made = self.interpolator.synthesise(
+                        staged, len(wanted), work / "out", stop=self._stop.is_set
+                    )
+                except interpolate_mod.Stopped:
+                    self._check()
+                    raise Cancelled("cancelled while interpolating") from None
+            # Across a cut there is no frame in between worth showing, and after the last
+            # frame of the job there is nothing to interpolate towards: both repeat.
+            loading: dict[int, concurrent.futures.Future[U8]] = {}
+            for index, frame in enumerate(batch):
+                if index + 1 >= len(wanted):
+                    continue
+                apart = interpolate_mod.frame_difference(held[frame], held[wanted[index + 1]])
+                if apart > interpolate_mod.CUT_LEVELS:
+                    self.cuts += 1
+                    self._say(
+                        f"frames {frame} and {wanted[index + 1]} are {apart:.0f} levels apart "
+                        f"(a cut is above {interpolate_mod.CUT_LEVELS:.0f}): repeating "
+                        f"{frame} rather than interpolating across it"
+                    )
+                    continue
+                loading[index] = self._pool.submit(
+                    interpolate_mod.collect, made[index], width, height
+                )
+            shared = (time.time() - tick) / len(batch)
+            for index, frame in enumerate(batch):
+                kept = held.pop(frame)
+                tick = time.time()
+                if index in loading:
+                    second = loading.pop(index).result()
+                    following_frame = wanted[index + 1]
+                    wrong = interpolate_mod.not_between(kept, second, held[following_frame])
+                    if wrong is not None:
+                        # Never delivered: the tool's exit code said this frame was fine.
+                        raise interpolate_mod.InterpolationError(
+                            f"the frame synthesised between {frame} and {following_frame} "
+                            f"is not a frame between them: {wrong}. "
+                            f"{interpolate_mod.OUT_OF_MEMORY} and run again -- finished "
+                            f"segments are kept -- or run without --interpolate."
+                        )
+                    self.synthesised += 1
+                else:
+                    second = kept
+                waited, harmonise_seconds, warp_seconds, gate_seconds = self._timings.pop(
+                    frame, (0.0, 0.0, 0.0, 0.0)
+                )
+                yield _Pair(
+                    frame,
+                    kept,
+                    second,
+                    waited,
+                    harmonise_seconds,
+                    warp_seconds,
+                    gate_seconds,
+                    shared + time.time() - tick,
+                )
+            if following is not None:
+                self._carried = {following: held[following]}
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def run_sequence(
     job: SequenceJob,
     *,
@@ -653,6 +994,7 @@ def run_sequence(
     log: Callable[[str], None] | None = None,
     plan: WarpPlan | None = None,
     cancel: threading.Event | None = None,
+    interpolator: interpolate_mod.Interpolator | None = None,
 ) -> Summary:
     """Encode the whole job to `job.output`. Raises rather than producing a bad file.
 
@@ -660,14 +1002,23 @@ def run_sequence(
     :class:`Cancelled`: the segment in progress is discarded, finished segments are kept,
     and re-running the same command resumes. Cancellation is checked between frames, so
     it takes up to one frame -- about 2 s at 8K -- to take effect.
+
+    `interpolator` replaces the one a `2x` job would look for beside the program; tests
+    pass a stand-in so the plumbing can be checked without the tool.
     """
     say = log or (lambda _: None)
     tools = encode.find_tools()
     tools.require("libx264" if job.spec.codec == "h264" else "libx265")
+    warnings: list[str] = []
+    # First, because without the tool the job is another job: half the rate and half the
+    # frames, which is what the audio fit, the disk estimate and the checks below measure.
+    job, interpolator = _place_interpolation(job, interpolator, say, warnings)
     audio_plan: audio_mod.AudioPlan | None = None
     if job.audio is not None:
         tools.require("aac")
-        audio_plan = audio_mod.plan(tools, job.audio, len(job.frames), job.spec.fps)
+        audio_plan = audio_mod.plan(
+            tools, job.audio, len(job.frames) * job.frame_factor, job.spec.fps
+        )
         say(f"audio: {audio_plan.describe()}")
     _check_disk(job)
 
@@ -700,8 +1051,13 @@ def run_sequence(
         plan.seam_band,
     ) != (*master, tile_size, job.sampler, job.feather_power, job.seam_band):
         raise ValueError("the supplied warp plan does not match this job")
-    warnings: list[str] = []
     warper, placement = _place_plan(plan, job.device, say, warnings)
+    # Now that the plan has taken its share of the card: does the interpolator still fit?
+    was_interpolating = interpolator is not None
+    job, interpolator = _rehearse_interpolation(job, interpolator, say, warnings)
+    if was_interpolating and interpolator is None and job.audio is not None:
+        # the plain job runs as long but counts half the frames at half the rate
+        audio_plan = audio_mod.plan(tools, job.audio, len(job.frames), job.spec.fps)
     decode_workers = job.decode_workers or default_decode_workers(placement.device)
     harmoniser = _harmoniser_for(job.harmonise, job.rig, tile_size, job.feather_power, say)
 
@@ -722,15 +1078,36 @@ def run_sequence(
     prepare = _preparer(job.source, indices, decode_workers, harmoniser)
 
     stop = cancel if cancel is not None else threading.Event()
+
+    def check_cancel() -> None:
+        if stop.is_set():
+            raise Cancelled(f"cancelled after {done} of {total} frame(s)")
+
+    def judge(
+        report: verify.Agreement, frame: int, corrections: harmonise.Corrections | None
+    ) -> None:
+        reports.append(report)
+        _judge(report, frame, corrections, warnings, say)
+
+    # Interpolating, the frames reach the encoder at the delivery size: they were resampled
+    # before the interpolator saw them, so there is no master left for ffmpeg to bring down.
+    writer_spec = job.spec if interpolator is None else dataclasses.replace(job.spec, master=None)
+    doubler: _Doubler | None = None
     with (
         _CancelScope(stop),
         concurrent.futures.ThreadPoolExecutor(max_workers=PREFETCH_DEPTH) as prefetch,
+        concurrent.futures.ThreadPoolExecutor(max_workers=STAGING_WORKERS) as staging,
     ):
+        if interpolator is not None:
+            doubler = _Doubler(
+                job, interpolator, warper, prepare, prefetch, staging,
+                stop=stop, check=check_cancel, judge=judge, say=say,
+            )  # fmt: skip
         for seg_index, seg_frames in segments:
             if stop.is_set():
                 raise Cancelled(f"cancelled after {done} of {total} frame(s)")
             path = job.segment_path(seg_index, seg_frames)
-            if job.resume and _segment_is_complete(tools, path, len(seg_frames)):
+            if job.resume and _segment_is_complete(tools, path, len(seg_frames) * job.frame_factor):
                 skipped += 1
                 done += len(seg_frames)
                 finished_paths.append(path)
@@ -742,9 +1119,35 @@ def run_sequence(
                     )  # fmt: skip
                 continue
 
-            writer = encode.SegmentWriter(tools, job.spec, path)
+            writer = encode.SegmentWriter(tools, writer_spec, path)
             try:
-                for frame, prepared, waited in _prefetch_tiles(prefetch, prepare, seg_frames):
+                for pair in doubler.segment(seg_frames) if doubler is not None else ():
+                    check_cancel()
+                    write_started = time.time()
+                    writer.write(pair.kept)
+                    writer.write(pair.second)
+                    written = time.time()
+                    stages.decode_wait += pair.waited
+                    stages.harmonise += pair.harmonise
+                    stages.warp += pair.warp
+                    stages.gate += pair.gate
+                    stages.interpolate += pair.interpolate
+                    stages.write += written - write_started
+                    stages.frames += 1
+                    done += 1
+                    encoded += 1
+                    recent.append(
+                        pair.waited + pair.warp + pair.gate + pair.interpolate
+                        + written - write_started
+                    )  # fmt: skip
+                    if progress:
+                        rate = float(np.mean(recent))
+                        progress(
+                            Progress(done, total, pair.frame, seg_index, len(segments), rate,
+                                     rate * (total - done))
+                        )  # fmt: skip
+                plain = seg_frames if doubler is None else ()
+                for frame, prepared, waited in _prefetch_tiles(prefetch, prepare, plain):
                     if stop.is_set():
                         raise Cancelled(f"cancelled after {done} of {total} frame(s)")
                     tiles, corrections, harmonise_seconds = prepared
@@ -811,10 +1214,14 @@ def run_sequence(
     )
     if metadata_failure:
         problems.append(metadata_failure)
-    if stream.frames != total:
-        problems.append(f"joined file has {stream.frames} frames, expected {total}")
+    delivered = total * job.frame_factor
+    if stream.frames != delivered:
+        problems.append(f"joined file has {stream.frames} frames, expected {delivered}")
     if not job.keep_segments and not problems:
         shutil.rmtree(job.segment_dir, ignore_errors=True)
+    else:
+        # kept segments are kept; the interpolator's scratch space never is
+        shutil.rmtree(job.segment_dir / "interpolate", ignore_errors=True)
     peak = memory.PeakMemory(
         stitcher=memory.peak_commit(),
         encoder=encoder_commit,
@@ -844,6 +1251,9 @@ def run_sequence(
         harmonised=harmoniser is not None,
         layout_report=layout_report,
         audio=audio_plan,
+        interpolation=doubler.interpolator.describe if doubler is not None else "",
+        synthesised=doubler.synthesised if doubler is not None else 0,
+        cuts=doubler.cuts if doubler is not None else 0,
     )
 
 

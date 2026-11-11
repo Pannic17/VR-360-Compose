@@ -8,6 +8,9 @@ sets. Run bare, it produces the onedir build -- the safe default:
 * `VRC_FFMPEG_DIR=<dir>` -- put that directory's ffmpeg.exe and ffprobe.exe *inside* the
   bundle. Only meaningful with `VRC_ONEFILE`: without it the folder build gets them
   copied in beside the executable, which is cheaper and does the same job.
+* `VRC_RIFE_DIR=<dir>` -- put that folder inside the bundle as `rife-ncnn-vulkan/`: the
+  frame interpolator (ROADMAP P16), 17 MiB. Like ffmpeg, only with `VRC_ONEFILE`; the
+  folder build gets it copied in beside the executable.
 * `VRC_GPU=1` -- put cupy and the CUDA libraries into the bundle, so `--device cuda`
   works on a machine that has an NVIDIA driver and nothing else installed. Costs about
   680 MB; see "The GPU build" below. Folder shape only.
@@ -135,6 +138,7 @@ GUI = ROOT / "src" / "vr_compose" / "gui"
 
 ONEFILE = os.environ.get("VRC_ONEFILE") == "1"
 FFMPEG_DIR = os.environ.get("VRC_FFMPEG_DIR") or None
+RIFE_DIR = os.environ.get("VRC_RIFE_DIR") or None
 GPU = os.environ.get("VRC_GPU") or ""
 if GPU not in ("", "bundled", "system"):
     raise SystemExit(f"VRC_GPU must be 'bundled' or 'system', got {GPU!r}")
@@ -180,6 +184,19 @@ if FFMPEG_DIR:
         if not tool.is_file():
             raise SystemExit(f"VRC_FFMPEG_DIR is set but {name} is not in {FFMPEG_DIR}")
         datas.append((str(tool), "."))
+
+if RIFE_DIR:
+    # The interpolator (ROADMAP P16), for the same reason and in the same way: a program
+    # run as a subprocess, so `datas`. The build script has already gathered exactly what
+    # ships -- the executable, its library, its licence and one model -- so everything in
+    # that folder goes in, under the name `interpolate.find` looks for in `sys._MEIPASS`.
+    payload = pathlib.Path(RIFE_DIR)
+    if not payload.is_dir():
+        raise SystemExit(f"VRC_RIFE_DIR is set but {RIFE_DIR} is not a folder")
+    for item in sorted(payload.rglob("*")):
+        if item.is_file():
+            destination = pathlib.Path("rife-ncnn-vulkan") / item.parent.relative_to(payload)
+            datas.append((str(item), str(destination)))
 
 binaries = []
 hiddenimports = ["vr_compose.cli", "vr_compose.gui.window"]

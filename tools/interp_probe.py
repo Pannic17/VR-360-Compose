@@ -17,6 +17,8 @@ Everything works on directories of numbered RGB PNG frames (`000000.png`, ...):
     tiles     interpolate each camera's tiles on their own and write the result as a tile
               source, to be stitched and scored (the "before the stitch" route)
     score     compare a directory of synthesised frames with `--truth-dir`
+    clip      the headset clip: a frame directory at twice the rate, every frame kept and
+              the ones in between synthesised, through the product's encoder
 
 Synthesised frame `i` lies between kept frames `i` and `i + 1` and is compared with frame
 `2 i + 1` of the truth directory, which is 60 fps numbering when the kept frames are 30 fps.
@@ -54,6 +56,7 @@ maximum and the percentile. `--crops` saves the worst blocks side by side.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import dataclasses
 import hashlib
 import itertools
@@ -70,7 +73,8 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vr_compose import encode, source
+from vr_compose import encode, source, spherical
+from vr_compose.interpolate import crop_equirect, pad_equirect
 from vr_compose.pipeline import parse_frames
 
 F32 = npt.NDArray[np.float32]
@@ -107,6 +111,20 @@ def link(src: pathlib.Path, dst: pathlib.Path) -> None:
         dst.hardlink_to(src)
     except OSError:
         shutil.copyfile(src, dst)
+
+
+def stage_rgb(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """Hand an interpolator a three-channel PNG.
+
+    Upstream's PNG tiles are RGBA with an opaque alpha, and rife-ncnn-vulkan does not
+    refuse a four-channel PNG: it writes grey noise the size of the input. Anything that
+    is not plain RGB is therefore re-encoded rather than linked.
+    """
+    with Image.open(src) as image:
+        if image.mode != "RGB":
+            image.convert("RGB").save(dst, format="PNG", compress_level=1)
+            return
+    link(src, dst)
 
 
 def fresh(directory: pathlib.Path) -> pathlib.Path:
@@ -268,29 +286,8 @@ def save_crops(
         write_rgb(directory / name, strip)
 
 
-# --------------------------------------------------------------------------- equirect padding
-
-
-def pad_equirect(image: U8, wrap: int, pole: int) -> U8:
-    """Continue an equirect past its edges the way the sphere does.
-
-    Past the left edge is the right edge. Past a pole is the same meridian seen from the
-    other side: the rows next to the pole, upside down and half a turn away.
-    """
-    width = image.shape[1]
-    if pole:
-        above = np.roll(image[:pole][::-1], width // 2, axis=1)
-        below = np.roll(image[-pole:][::-1], width // 2, axis=1)
-        image = np.concatenate([above, image, below], axis=0)
-    if wrap:
-        image = np.concatenate([image[:, -wrap:], image, image[:, :wrap]], axis=1)
-    return image
-
-
-def crop_equirect(image: U8, wrap: int, pole: int) -> U8:
-    height, width = image.shape[0] - 2 * pole, image.shape[1] - 2 * wrap
-    return image[pole : pole + height, wrap : wrap + width]
-
+# The equirect padding (`pad_equirect`, `crop_equirect`) started here and moved into the
+# product with step 3: `vr_compose.interpolate` holds the one implementation, imported above.
 
 # --------------------------------------------------------------------------- video memory
 
@@ -472,7 +469,7 @@ def do_rife(
         if method.pad:
             write_rgb(staged / f"{i:06d}.png", pad_equirect(read_rgb(path), wrap, pole))
         else:
-            link(path, staged / f"{i:06d}.png")
+            stage_rgb(path, staged / f"{i:06d}.png")
     prepare = time.time() - started
     raw = fresh(work / "raw")
     elapsed, memory = run_rife(
@@ -673,7 +670,8 @@ def cmd_tiles(args: argparse.Namespace) -> int:
     for camera in tiles.cameras:
         staged = fresh(work / "in")
         for i, frame in enumerate(kept):
-            link(camera.path_for(tiles.stem, frame, tiles.frame_digits), staged / f"{i:06d}.png")
+            tile = camera.path_for(tiles.stem, frame, tiles.frame_digits)
+            stage_rgb(tile, staged / f"{i:06d}.png")
         raw = fresh(work / "raw")
         elapsed, memory = run_rife(
             args.rife, args.model, staged, raw, gpu=args.gpu, jobs=args.jobs, flags=()
@@ -691,6 +689,111 @@ def cmd_tiles(args: argparse.Namespace) -> int:
         f"{seconds / pairs:.2f} s per panorama; {memory}; tile source in {args.out}"
     )
     return 0
+
+
+def interleave(kept: int) -> list[tuple[str, int]]:
+    """Where each of the `2 * kept` delivered frames comes from.
+
+    `("kept", i)` is frame `i` as it was stitched, `("made", i)` the frame synthesised
+    between `i` and `i + 1`. The slot after the last kept frame has nothing to interpolate
+    towards and repeats it, so the clip lasts exactly as long as its original.
+    """
+    order: list[tuple[str, int]] = []
+    for i in range(kept):
+        order.append(("kept", i))
+        order.append(("made", i) if i < kept - 1 else ("kept", i))
+    return order
+
+
+def cmd_clip(args: argparse.Namespace) -> int:
+    """A directory of delivery-size frames -> twice the frame rate, as a delivery MP4.
+
+    The headset clip of the plan's step 2: every frame of `--frames` is kept untouched,
+    rife synthesises the frame between each pair on the padded equirect, and the product's
+    own encoder writes the result at twice the rate with the spherical metadata -- the same
+    arguments `vr-compose sequence --fps 60` gives ffmpeg, so the clip differs from a real
+    60 fps delivery only in where its odd frames came from. Padding and the rife run are
+    kept in `--work`, so a second call re-encodes without redoing them.
+    """
+    if args.rife is None:
+        raise SystemExit("clip needs --rife <directory of rife-ncnn-vulkan>")
+    if args.out.suffix.lower() != ".mp4":
+        raise SystemExit(f"--out must be an .mp4, got {args.out}")
+    tools = encode.find_tools()
+    kept = frame_paths(args.frames)
+    with Image.open(kept[0]) as first:
+        size = first.size
+    sizes = [name for name, dimensions in encode.SIZES.items() if dimensions == size]
+    if not sizes:
+        raise SystemExit(f"the frames are {size[0]} x {size[1]}, not a delivery size")
+    spec = encode.EncodeSpec.for_size(sizes[0], args.codec, args.bitrate, args.fps)
+    print(f"{len(kept)} frame(s) of {args.frames} -> {2 * len(kept)} at {spec.describe()}")
+
+    staged = args.work / "in"
+    staged.mkdir(parents=True, exist_ok=True)
+    for stale in staged.glob("*.part"):
+        stale.unlink()
+
+    def pad(item: tuple[int, pathlib.Path]) -> None:
+        index, path = item
+        target = staged / f"{index:06d}.png"
+        if not target.exists():
+            partial = target.with_suffix(".part")
+            write_rgb(partial, pad_equirect(read_rgb(path), args.wrap, args.pole))
+            partial.replace(target)
+
+    started = time.time()
+    with concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
+        list(pool.map(pad, enumerate(kept)))
+    print(f"padded in {time.time() - started:.0f} s", flush=True)
+
+    raw = args.work / "raw"
+    if len(list(raw.glob("*.png"))) != 2 * len(kept):
+        fresh(raw)
+        elapsed, memory = run_rife(
+            args.rife, args.model, staged, raw, gpu=args.gpu, jobs=args.jobs, flags=()
+        )
+        pairs = len(kept) - 1
+        print(
+            f"{args.model}: {elapsed:.0f} s for {pairs} pairs = {elapsed / pairs:.2f} s each; "
+            f"{memory}",
+            flush=True,
+        )
+
+    def load(slot: tuple[str, int]) -> U8:
+        kind, index = slot
+        if kind == "kept":
+            return read_rgb(kept[index])
+        made = read_rgb(raw / f"{2 * index + 2:08d}.png")
+        return crop_equirect(made, args.wrap, args.pole)
+
+    order = interleave(len(kept))
+    started = time.time()
+    writer = encode.SegmentWriter(tools, spec, args.out)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
+            for batch in itertools.batched(order, 2 * args.workers, strict=False):
+                for image in pool.map(load, batch):
+                    writer.write(image)
+    except BaseException:
+        writer.abort()
+        raise
+    writer.close()
+    added = spherical.inject(args.out, spherical.Spherical())
+    stream = encode.probe(tools, args.out)
+    problems = stream.conformance_problems(spec, spherical=True)
+    if stream.frames != len(order):
+        problems.append(f"{stream.frames} frames, expected {len(order)}")
+    megabytes = args.out.stat().st_size / 2**20
+    print(
+        f"encoded in {time.time() - started:.0f} s: {stream.codec} {stream.profile} "
+        f"L{stream.level} {stream.tag} {stream.width}x{stream.height} {stream.pix_fmt}, "
+        f"{stream.frames} frames, B={stream.b_frames}, I-gap={sorted(set(stream.i_intervals))}, "
+        f"{stream.bitrate_mbps:.1f} Mbps, projection {stream.projection or 'absent'} "
+        f"(+{added} bytes), {megabytes:.0f} MiB"
+    )
+    print("conformance: " + ("OK" if not problems else "; ".join(problems)))
+    return 1 if problems else 0
 
 
 def main() -> int:
@@ -762,6 +865,20 @@ def main() -> int:
     tiles.add_argument("--out", type=pathlib.Path, required=True)
     rife_options(tiles)
     tiles.set_defaults(run=cmd_tiles)
+
+    clip = sub.add_parser("clip", help="a frame directory at twice the rate, as a delivery MP4")
+    clip.add_argument("--frames", type=pathlib.Path, required=True, help="delivery-size frames")
+    clip.add_argument("--work", type=pathlib.Path, required=True)
+    clip.add_argument("--out", type=pathlib.Path, required=True, help="the .mp4 to write")
+    clip.add_argument("--model", default="rife-v4.6")
+    clip.add_argument("--wrap", type=int, default=256)
+    clip.add_argument("--pole", type=int, default=128)
+    clip.add_argument("--fps", type=int, default=60, help="of the result: twice the frames'")
+    clip.add_argument("--codec", choices=("h264", "h265"), default="h264")
+    clip.add_argument("--bitrate", choices=list(encode.LADDER), default="high")
+    clip.add_argument("--workers", type=int, default=4, help="threads reading and padding PNGs")
+    rife_options(clip)
+    clip.set_defaults(run=cmd_clip)
 
     args = parser.parse_args()
     result: int = args.run(args)

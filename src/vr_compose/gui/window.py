@@ -56,6 +56,7 @@ from vr_compose import source as source_mod
 from vr_compose.audio import AUDIO_EXTENSIONS
 from vr_compose.device import GUI_DEVICE
 from vr_compose.harmonise import DEFAULT_HARMONISE
+from vr_compose.interpolate import DEFAULT_INTERPOLATION
 from vr_compose.rig import UnknownRigError
 from vr_compose.stitch import (
     BIT_DEPTHS,
@@ -67,6 +68,8 @@ from vr_compose.stitch import (
 
 HERE = pathlib.Path(__file__).resolve().parent
 UI_FILE = HERE / "main_window.ui"
+INTERPOLATED_FPS = "60"
+"""What the frame-rate combo shows while interpolation is ticked: a 30 fps capture doubled."""
 QSS_FILE = HERE / "style.qss"
 ICON_FILE = HERE / "icon.png"
 """The application icon (user, 2026-09-09). The executable carries the same picture as
@@ -153,6 +156,8 @@ class ComposeWindow(QMainWindow):
         return widget
 
     def _bind_widgets(self) -> None:
+        self._fps_before: str | None = None
+        """The frame rate the combo held before interpolation took it over, while it does."""
         self.status_banner: QLabel = self._child(QLabel, "statusBannerLabel")
         self.source_edit: QLineEdit = self._child(QLineEdit, "sourceLineEdit")
         self.browse_source: QPushButton = self._child(QPushButton, "browseSourceButton")
@@ -175,6 +180,7 @@ class ComposeWindow(QMainWindow):
         self.gate_combo: QComboBox = self._child(QComboBox, "gateComboBox")
         self.layout_gate_combo: QComboBox = self._child(QComboBox, "layoutGateComboBox")
         self.harmonise_check: QCheckBox = self._child(QCheckBox, "harmoniseCheckBox")
+        self.interpolate_check: QCheckBox = self._child(QCheckBox, "interpolateCheckBox")
         self.bit_depth_combo: QComboBox = self._child(QComboBox, "bitDepthComboBox")
         self.progress_bar: QProgressBar = self._child(QProgressBar, "progressBar")
         self.progress_detail: QLabel = self._child(QLabel, "progressDetailLabel")
@@ -192,6 +198,7 @@ class ComposeWindow(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel)
         self.stem_combo.currentTextChanged.connect(self._stem_changed)
         self.video_radio.toggled.connect(self._mode_changed)
+        self.interpolate_check.toggled.connect(self._mode_changed)
 
     def _apply_static_properties(self) -> None:
         for button, variant in (
@@ -221,6 +228,7 @@ class ComposeWindow(QMainWindow):
         self.layout_gate_combo.addItems(list(layout.LAYOUT_GATES))
         self.layout_gate_combo.setCurrentText(layout.DEFAULT_LAYOUT_GATE)
         self.harmonise_check.setChecked(DEFAULT_HARMONISE)
+        self.interpolate_check.setChecked(DEFAULT_INTERPOLATION != "off")
         self.bit_depth_combo.addItems([str(depth) for depth in BIT_DEPTHS])
         self._mode_changed()
 
@@ -338,7 +346,11 @@ class ComposeWindow(QMainWindow):
         shown = manifest_mod.describe_rate(rate)
         self.log(f"装配按清单认：{choice.rig.name}，采集 {shown} fps，不跑布局门。")
         if rate in (30, 60):
-            self.fps_combo.setCurrentText(str(int(rate)))
+            if self._fps_before is not None:
+                # interpolation is ticked and owns the combo; this is what unticking restores
+                self._fps_before = str(int(rate))
+            else:
+                self.fps_combo.setCurrentText(str(int(rate)))
         else:
             self.log(
                 f"采集是 {shown} fps，交付只有 30 / 60："
@@ -353,18 +365,31 @@ class ComposeWindow(QMainWindow):
         writes PNGs at the input's own density, losslessly (P5) -- and video mode has no
         master bit depth. Showing that as disabled controls is friendlier than letting the
         CLI reject the combination after the fact.
+
+        Interpolation (P16) is video-only for the same reason, and it settles the frame
+        rate: twice the capture's, which for a delivery means 60. The combo shows that and
+        stops being a choice, because the CLI refuses any other `--fps` beside it.
         """
         video = self.video_radio.isChecked()
         for widget in (
             self.size_combo,
             self.codec_combo,
             self.bitrate_combo,
-            self.fps_combo,
             self.audio_edit,
             self.browse_audio,
             self.clear_audio,
+            self.interpolate_check,
         ):
             widget.setEnabled(video)
+        interpolating = video and self.interpolate_check.isChecked()
+        if interpolating and self._fps_before is None:
+            self._fps_before = self.fps_combo.currentText()
+            self.fps_combo.setCurrentText(INTERPOLATED_FPS)
+        elif not self.interpolate_check.isChecked() and self._fps_before is not None:
+            # unticked again: the rate that was chosen before comes back
+            self.fps_combo.setCurrentText(self._fps_before)
+            self._fps_before = None
+        self.fps_combo.setEnabled(video and not interpolating)
         self.bit_depth_combo.setEnabled(not video)
 
     # --- browsing ---------------------------------------------------------------------
@@ -451,9 +476,14 @@ class ComposeWindow(QMainWindow):
                 self.codec_combo.currentText(),
                 "--bitrate",
                 self.bitrate_combo.currentText(),
-                "--fps",
-                self.fps_combo.currentText(),
             ]
+            # Unticked, the command does not mention interpolation at all and carries the
+            # combo's rate as it always has. Ticked, it carries no rate: the CLI takes
+            # twice the capture's, and refuses a 60 fps capture in its own words.
+            if self.interpolate_check.isChecked():
+                argv += ["--interpolate", "2x"]
+            else:
+                argv += ["--fps", self.fps_combo.currentText()]
             # No file, no option: a run without audio is the argv it has always been.
             if audio := self.audio_edit.text().strip():
                 argv += ["--audio", audio]
@@ -586,6 +616,11 @@ class ComposeWindow(QMainWindow):
         )
         if event.get("audio"):
             self.log(f"  音频：{event['audio']}")
+        if event.get("interpolation"):
+            self.log(
+                f"  插帧：{event.get('frames')} 帧拼接，交付 {event.get('delivered')} 帧"
+                f"（{event['interpolation']}）"
+            )
         for problem in event.get("problems", []):
             self.log(f"  合规问题：{problem}")
         for warning in event.get("warnings", []):
@@ -680,6 +715,7 @@ class ComposeWindow(QMainWindow):
                 self.codec_combo,
                 self.bitrate_combo,
                 self.fps_combo,
+                self.interpolate_check,
                 self.bit_depth_combo,
                 self.audio_edit,
                 self.browse_audio,
