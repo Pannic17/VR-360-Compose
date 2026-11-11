@@ -16,6 +16,7 @@ ships them alongside, AGENTS.md §7), then on PATH.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import dataclasses
 import itertools
@@ -44,6 +45,7 @@ __all__ = [
     "Tools",
     "concat",
     "find_tools",
+    "resize_lanczos",
     "select_level",
 ]
 
@@ -153,6 +155,56 @@ def _locate(name: str) -> pathlib.Path | None:
             return candidate
     found = shutil.which(name)
     return pathlib.Path(found) if found else None
+
+
+def resize_lanczos(
+    image: npt.NDArray[np.uint8] | npt.NDArray[np.uint16], width: int, height: int
+) -> npt.NDArray[np.uint8] | npt.NDArray[np.uint16]:
+    """`image` (rows, columns, RGB) resized to `width` x `height` by ffmpeg's lanczos.
+
+    The swscale filter :meth:`EncodeSpec.ffmpeg_args` delivers a master smaller with, so an
+    ID matte resized here lands on the pixels of the picture it belongs to (ROADMAP P17).
+    Each channel is resized on its own as a grey image: an ID matte holds one group per
+    channel, and swscale resizing RGB as RGB, even planar, lets a channel move another by
+    a few levels. The bit depth is kept. The three channels run side by side.
+    """
+    ffmpeg = _locate("ffmpeg")
+    if ffmpeg is None:
+        raise FfmpegNotFound("ffmpeg was not found next to the executable or on PATH")
+    deep = image.dtype == np.uint16
+    sample = np.dtype("<u2") if deep else np.dtype(np.uint8)
+    pixel_format = "gray16le" if deep else "gray"
+    rows, columns = image.shape[:2]
+
+    def one(channel: int) -> npt.NDArray[np.generic]:
+        command = [
+            str(ffmpeg), "-hide_banner", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", pixel_format, "-s", f"{columns}x{rows}", "-i", "pipe:0",
+            "-vf", f"scale={width}:{height}:flags=lanczos",
+            "-f", "rawvideo", "-pix_fmt", pixel_format, "pipe:1",
+        ]  # fmt: skip
+        result = subprocess.run(
+            command,
+            input=np.ascontiguousarray(image[..., channel], dtype=sample).tobytes(),
+            capture_output=True,
+            creationflags=child_creation_flags(),
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(f"ffmpeg could not resize to {width}x{height}: {message}")
+        plane = np.frombuffer(result.stdout, dtype=sample)
+        if plane.size != width * height:
+            raise RuntimeError(
+                f"ffmpeg returned {plane.size} samples for {width}x{height} when resizing"
+            )
+        return plane.reshape(height, width)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        planes = list(pool.map(one, range(3)))
+    if deep:
+        return np.stack(planes, axis=-1).astype(np.uint16)
+    return np.stack(planes, axis=-1).astype(np.uint8)
 
 
 def find_tools() -> Tools:

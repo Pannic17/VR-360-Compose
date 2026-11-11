@@ -5,7 +5,9 @@ directory, beside ``Camera01..Camera15``, recording the rig and settings it actu
 applied. Its contract fields are `schema`, `schema_version`, `state`, `rig` (type,
 coordinate system, orientation reference, and per view the directory, pitch, yaw, roll,
 field of view and the frames written), `tiles` and `frames.rate`; a change of meaning
-bumps the version, an added field does not.
+bumps the version, an added field does not. `id_mattes` is one: on a capture with ID
+groups it names the stems that are ID mattes and the group in each channel, and such a
+stem is stitched in ID matte mode (ROADMAP P17).
 
 A 15-directory capture and a 20-directory Camera360 capture with only ``Camera1..15``
 copied look the same on disk (ROADMAP P11). The manifest is how a capture says which it
@@ -38,6 +40,8 @@ __all__ = [
     "MANIFEST_NAME",
     "SCHEMA",
     "SCHEMA_VERSIONS",
+    "IdMatteChannel",
+    "IdMatteImage",
     "Manifest",
     "ManifestError",
     "ManifestView",
@@ -58,6 +62,8 @@ That is :class:`~vr_compose.rig.View` with yaw = UE yaw and elevation = UE pitch
 registered rigs' handedness (`mirrored`, AGENTS.md section 3)."""
 ORIENTATION_REFERENCES = ("world", "camera")
 """Both stitch the same way: every view of a frame shares the reference."""
+ID_MATTE_CHANNELS = ("R", "G", "B")
+"""The channels of an ID matte image, each holding one ID group's coverage."""
 ENCODINGS = {"png": "srgb8", "exr": "linear_half"}
 """How :mod:`vr_compose.io` reads each tile format; a manifest saying otherwise describes
 pixels this program would misread."""
@@ -90,6 +96,30 @@ class ManifestView:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class IdMatteChannel:
+    """One channel of an ID matte image: the ID group whose coverage it holds."""
+
+    channel: str
+    id: int
+    group: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class IdMatteImage:
+    """One ID matte image of a capture with ID groups (upstream Part 10): its file stems,
+    and the group in each of its channels. Channels without a group are left out."""
+
+    name: str
+    stems: tuple[str, ...]
+    channels: tuple[IdMatteChannel, ...]
+
+    def describe(self) -> str:
+        """``IdMatte1 -- R 1 Creatures, G 2 Wreck, B 3 Coral``."""
+        groups = ", ".join(f"{c.channel} {c.id} {c.group}" for c in self.channels)
+        return f"{self.name} -- {groups or 'no group'}"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class Manifest:
     """The contract fields of one manifest."""
 
@@ -107,6 +137,12 @@ class Manifest:
     alpha: str
     stems: tuple[str, ...]
     rate: fractions.Fraction
+    id_mattes: tuple[IdMatteImage, ...] = ()
+    """The ID matte images; empty for a capture without ID groups."""
+
+    def id_matte_for(self, stem: str) -> IdMatteImage | None:
+        """The ID matte image whose stems hold `stem`, or None for a picture's stem."""
+        return next((image for image in self.id_mattes if stem in image.stems), None)
 
 
 def _get(obj: Mapping[str, object], key: str, where: str) -> object:
@@ -148,6 +184,42 @@ def _number(obj: Mapping[str, object], key: str, where: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ManifestError(f"{where}{key} is not a number")
     return float(value)
+
+
+def _id_matte_image(value: object, where: str) -> IdMatteImage:
+    obj = _object(value, where)
+    stems = _get(obj, "stems", where)
+    if not isinstance(stems, list) or not all(isinstance(stem, str) for stem in stems):
+        raise ManifestError(f"{where}stems is not a list of strings")
+    channels_obj = _object(_get(obj, "channels", where), f"{where}channels.")
+    channels: list[IdMatteChannel] = []
+    for channel in ID_MATTE_CHANNELS:
+        entry = _get(channels_obj, channel, f"{where}channels.")
+        if entry is None:
+            continue
+        group = _object(entry, f"{where}channels.{channel}.")
+        channels.append(
+            IdMatteChannel(
+                channel=channel,
+                id=_integer(group, "id", f"{where}channels.{channel}."),
+                group=_text(group, "group", f"{where}channels.{channel}."),
+            )
+        )
+    return IdMatteImage(
+        name=_text(obj, "name", where), stems=tuple(stems), channels=tuple(channels)
+    )
+
+
+def _id_mattes(top: Mapping[str, object]) -> tuple[IdMatteImage, ...]:
+    """The optional `id_mattes.images`: none when the capture had no ID groups."""
+    if "id_mattes" not in top:
+        return ()
+    images = _get(_object(top["id_mattes"], "id_mattes."), "images", "id_mattes.")
+    if not isinstance(images, list):
+        raise ManifestError("id_mattes.images is not a list")
+    return tuple(
+        _id_matte_image(image, f"id_mattes.images[{i}].") for i, image in enumerate(images)
+    )
 
 
 def _view(value: object, where: str) -> ManifestView:
@@ -218,6 +290,7 @@ def read(path: pathlib.Path) -> Manifest:
         alpha=_text(tiles, "alpha", "tiles."),
         stems=tuple(stems),
         rate=fractions.Fraction(numerator, denominator),
+        id_mattes=_id_mattes(top),
     )
 
 
@@ -235,6 +308,9 @@ class RigChoice:
     """The manifest that built `rig`; None when the registry did."""
     set_aside: str | None = None
     """Why a manifest that is present did not build the rig."""
+    id_matte: IdMatteImage | None = None
+    """The ID matte image the source's stem belongs to, by the manifest that built the rig;
+    None for a picture. Such a stem is stitched in ID matte mode (ROADMAP P17)."""
 
     @property
     def rate(self) -> fractions.Fraction | None:
@@ -247,12 +323,15 @@ class RigChoice:
             state = "none" if self.set_aside is None else f"not used -- {self.set_aside}"
             return [f"manifest   : {state}"]
         found = self.manifest
-        return [
+        lines = [
             f"manifest   : {found.path.name} -- schema {found.schema_version}, {found.state}, "
             f"{found.rig_type}, {len(found.views)} views relative to the "
             f"{found.orientation_reference}, {describe_rate(found.rate)} fps",
             "layout     : from manifest -- the layout gate is not run",
         ]
+        if self.id_matte is not None:
+            lines.append(f"id matte   : {self.id_matte.describe()}")
+        return lines
 
 
 def _directory_name(source: SourceSet, camera: CameraFiles) -> str:
@@ -372,4 +451,6 @@ def choose_rig(source: SourceSet) -> RigChoice:
             return RigChoice(rig_for(source.camera_count), set_aside=str(exc))
         except UnknownRigError as unknown:
             raise UnknownRigError(f"{unknown} The manifest was not used: {exc}") from None
-    return RigChoice(_rig_from(found, cameras), manifest=found)
+    return RigChoice(
+        _rig_from(found, cameras), manifest=found, id_matte=found.id_matte_for(source.stem)
+    )

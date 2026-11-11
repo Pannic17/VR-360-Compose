@@ -303,6 +303,12 @@ def cmd_frame(args: argparse.Namespace) -> int:
     print(f"rig        : {rig.name}, reading {len(indices)} of {rig.file_count} files")
     for line in choice.lines():
         print(line)
+    if choice.id_matte is not None:
+        # As `sequence` does for a matte (ROADMAP P17): coverage is neither evened out nor
+        # judged as a picture.
+        args.harmonise = False
+        args.gate = "off"
+        print("id matte   : not harmonised, overlap gate off")
     if (note := _layout_note(rig, args.layout_gate)) is not None:
         print(note)
     started = time.time()
@@ -469,6 +475,26 @@ AUDIO_HELP = (
 MASTER_ONLY = ("compress_level", "write_workers", "bit_depth")
 """...and the ones that only mean something when master files are."""
 
+MASTER_BIT_DEPTH = 8
+"""A PNG master's depth when `--bit-depth` is not given."""
+
+
+ID_MATTE_UNUSED = (
+    *(name for name in DELIVERY_ONLY if name not in ("size", "stitch_at")),
+    "preset",
+)
+"""`sequence` options an ID matte has no use for whatever the output: it is a PNG sequence
+of coverage, with no encoder, frame rate, interpolation or audio (ROADMAP P17)."""
+
+
+def _given(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
+    """The options among `names` set to something other than the parser's default."""
+    return [name for name in names if getattr(args, name) != args.option_defaults[name]]
+
+
+def _flags(names: list[str]) -> str:
+    return ", ".join("--" + name.replace("_", "-") for name in names)
+
 
 def _reject_inapplicable(args: argparse.Namespace, names: tuple[str, ...], why: str) -> None:
     """Refuse options that cannot apply, rather than ignoring them (AGENTS.md §10).
@@ -476,10 +502,9 @@ def _reject_inapplicable(args: argparse.Namespace, names: tuple[str, ...], why: 
     Compares against the parser's own defaults, so passing a default value explicitly is
     not treated as asking for anything.
     """
-    given = [name for name in names if getattr(args, name) != args.option_defaults[name]]
+    given = _given(args, names)
     if given:
-        flags = ", ".join("--" + name.replace("_", "-") for name in given)
-        raise SystemExit(f"{flags} {why}")
+        raise SystemExit(f"{_flags(given)} {why}")
 
 
 def cmd_master(
@@ -489,20 +514,44 @@ def cmd_master(
     frames: list[int],
     stamp: str,
 ) -> int:
-    """`sequence --out-format png` or `exr`: a lossless master per frame.
+    """`sequence --out-format png` or `exr`: a lossless master per frame; and every
+    `sequence` of an ID matte stem.
 
     Masters are always at the source's native density -- the sampling density the tiles
     were rendered at, `Rig.native_width` -- because a master is the thing other sizes are
     derived *from*. For a one-off at some other width, `frame --width` is the command.
     An EXR master is the 16-bit stitch written as linear half-float, so `--bit-depth` has
     nothing to choose there and is refused rather than ignored.
+
+    An ID matte (ROADMAP P17) follows the options its picture would be stitched with: with
+    `--out-format mp4` it is a PNG sequence at `--size`, stitched where the picture is and
+    resized by the picture's scaler; with png or exr it is the native master. It is never
+    harmonised or gated, and the options it has no use for are named and passed over, so
+    the picture's own command line composes its matte.
     """
-    _reject_inapplicable(
-        args,
-        DELIVERY_ONLY,
-        "only apply to --out-format mp4. A master has no codec, bitrate, frame rate "
-        "or delivery size to choose: it is the source's own density, losslessly.",
-    )
+    rig = choice.rig
+    tile = chosen.tile_size
+    if tile is None:
+        raise SystemExit("source tiles are not square or not uniform; cannot stitch")
+    width = rig.native_width(tile)
+    out_format = args.out_format
+    matte = choice.id_matte
+    if args.out_format == "exr":
+        bit_depth = 16
+    elif args.bit_depth is not None:
+        bit_depth = args.bit_depth
+    else:
+        bit_depth = pipeline.ID_MATTE_BIT_DEPTH if matte is not None else MASTER_BIT_DEPTH
+    delivery: tuple[int, int] | None = None
+    output = args.out
+    unused: list[str] = []
+    if matte is None:
+        _reject_inapplicable(
+            args,
+            DELIVERY_ONLY,
+            "only apply to --out-format mp4. A master has no codec, bitrate, frame rate "
+            "or delivery size to choose: it is the source's own density, losslessly.",
+        )
     if args.out_format == "exr":
         _reject_inapplicable(
             args,
@@ -510,19 +559,23 @@ def cmd_master(
             "only applies to --out-format png; an EXR master is always the 16-bit stitch, "
             "written as linear half-float.",
         )
-    rig = choice.rig
-    tile = chosen.tile_size
-    if tile is None:
-        raise SystemExit("source tiles are not square or not uniform; cannot stitch")
-    width = rig.native_width(tile)
+    if matte is not None:
+        unused = _given(
+            args, ID_MATTE_UNUSED + (() if args.out_format == "mp4" else ("size", "stitch_at"))
+        )
+        if args.out_format == "mp4":
+            out_format = "png"
+            delivery = encode.SIZES[args.size]
+            width = (_master_size(chosen, rig, args.size, args.stitch_at) or delivery)[0]
+            if output is not None and output.suffix.lower() == ".mp4":
+                output = output.with_suffix("")
     default_name = pipeline.default_master_dir_name(chosen, stamp)
     try:
         job = pipeline.MasterJob(
             source=chosen,
             rig=rig,
             frames=tuple(frames),
-            directory=args.out
-            or pipeline.unique_path(pipeline.default_output_dir() / default_name),
+            directory=output or pipeline.unique_path(pipeline.default_output_dir() / default_name),
             width=width,
             compress_level=args.compress_level,
             decode_workers=args.decode_workers,
@@ -530,21 +583,32 @@ def cmd_master(
             sampler=args.sampler,
             feather_power=args.feather_power,
             seam_band=args.seam_band,
-            bit_depth=16 if args.out_format == "exr" else args.bit_depth,
+            bit_depth=bit_depth,
             write_workers=args.write_workers,
             stats_every=args.stats_every,
             resume=not args.no_resume,
             device=args.device,
-            harmonise=args.harmonise,
-            gate=args.gate,
+            harmonise=args.harmonise and matte is None,
+            gate="off" if matte is not None else args.gate,
             layout_gate=args.layout_gate,
-            out_format=args.out_format,
+            out_format=out_format,
+            delivery=delivery,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
     pending = job.pending_frames()
     kind = "linear half-float EXR" if job.out_format == "exr" else f"{job.bit_depth}-bit PNG"
+    written = delivery or (width, width // 2)
+    if delivery is None:
+        density = "at the input's own density"
+    elif delivery == (width, width // 2):
+        density = f"stitched at the {args.size} delivery size"
+    else:
+        density = (
+            f"stitched at {width}x{width // 2} and resized to the {args.size} delivery size "
+            "with the picture's lanczos"
+        )
     report = Reporter(json=args.progress_json)
     report.say(f"source     : {chosen.root}  stem {chosen.stem!r}")
     report.say(
@@ -552,12 +616,20 @@ def cmd_master(
     )
     for line in choice.lines():
         report.say(line)
+    if matte is not None:
+        report.say(
+            "id matte   : not harmonised, overlap gate off -- coverage is not a picture to "
+            "even out or judge"
+        )
+        if unused:
+            report.say(f"not used   : {_flags(unused)} -- nothing an ID matte has")
     if (note := _layout_note(rig, args.layout_gate)) is not None:
         report.say(note)
     report.say(f"frames     : {frames[0]}..{frames[-1]} ({len(frames)}), {len(pending)} to render")
     report.say(
-        f"master     : {width}x{width // 2} {kind} at the input's own "
-        f"density, lossless (zlib {job.compress_level}), sampler {job.sampler}"
+        f"{'matte ' if matte is not None else 'master'}     : "
+        f"{written[0]}x{written[1]} {kind} {density}, lossless (zlib {job.compress_level}), "
+        f"sampler {job.sampler}"
     )
     report.say(f"output     : {job.directory}")
     report.event(
@@ -568,7 +640,7 @@ def cmd_master(
         first=frames[0],
         last=frames[-1],
         output=str(job.directory),
-        describe=f"{width}x{width // 2} {kind}, lossless",
+        describe=f"{written[0]}x{written[1]} {kind}, lossless",
         sampler=job.sampler,
         baseline_seconds_per_frame=pipeline.PREVIOUS_PIPELINE_SECONDS_PER_FRAME,
     )
@@ -695,7 +767,7 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     # One stamp for the whole run: it names the output *and*, for the MP4 path, the
     # segment directory derived from it, so a second reading could split a job in two.
     stamp = pipeline.run_stamp()
-    if args.out_format != "mp4":
+    if args.out_format != "mp4" or choice.id_matte is not None:
         return cmd_master(args, chosen, choice, frames, stamp)
     _reject_inapplicable(
         args, MASTER_ONLY, "only apply to --out-format png/exr; an MP4 is not a frame sequence."
@@ -1218,11 +1290,11 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument(
         "--bit-depth",
         type=int,
-        default=8,
+        default=None,
         choices=list(BIT_DEPTHS),
-        help="PNG master depth; 16 keeps the resample's sub-level precision, which 8-bit "
-        "quantisation throws away (--out-format png only; an EXR master is always the "
-        "16-bit stitch)",
+        help=f"PNG master depth, {MASTER_BIT_DEPTH} by default; 16 keeps the resample's "
+        "sub-level precision, which 8-bit quantisation throws away (--out-format png only; "
+        "an EXR master is always the 16-bit stitch). An ID matte's PNGs default to 16",
     )
     sequence.add_argument(
         "--write-workers",
@@ -1236,7 +1308,8 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.set_defaults(
         func=cmd_sequence,
         option_defaults={
-            name: sequence.get_default(name) for name in (*DELIVERY_ONLY, *MASTER_ONLY)
+            name: sequence.get_default(name)
+            for name in (*DELIVERY_ONLY, *MASTER_ONLY, *ID_MATTE_UNUSED)
         },
     )
     return parser

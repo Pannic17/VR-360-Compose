@@ -1979,6 +1979,70 @@ AGENTS.md 没加章节，等裁决后结论要进产品时再写。
 
 ---
 
+## P17 — ID 遮罩：按清单的 ID 标签拼遮罩，尺寸跟着成片走（上游 G3；用户 2026-11-11 批准，同日做完、验收）
+
+**来由**：上游 Part 10（G1、G2，2026-11-10 落地）在每个视图多渲一张覆盖遮罩（`<stem>.PanoramicIdMatte1` 等，
+每张图 R/G/B 各是一组物体，值是 0 到 1 的覆盖比例），清单的 `id_mattes` 写明哪些 stem 是遮罩、每个通道是哪个 ID。
+上游的自动合成用今天的参数拼它：16-bit PNG 母版、关 harmonise、关两个门。用户 2026-11-11 看了结果问「遮罩为什么
+不匹配成片」：母版按原生密度出（2560 的 tile 是 10240 宽），成片 MP4 是 8K（7680）。用户定：清单带上 ID 标签，
+VR-Compose 拼的时候用 ID 的拼接配置，尺寸匹配 MRQ（也就是成片）的设置，流程顺畅就行。
+
+**做法**（上游 ROADMAP G3 是同一份方案）：
+
+1. `manifest.py` 读 `id_mattes`（新增字段，`schema_version` 仍是 1，没有它的清单照旧）：每张遮罩图的 `name`、`stems`、
+   `channels`（R/G/B 各是 `{id, group}` 或 `null`）。格式不对的 `id_mattes` 让清单整份放下，原因写进报告，和其它合同字段一样。
+   清单可用、正在拼的 stem 在某张遮罩图的 `stems` 里，就进**遮罩模式**；`RigChoice` 带上这张图，报告多一行列出各通道的 ID 和组名。
+2. 遮罩模式下 `sequence`：
+   - 不做 harmonise，不跑重叠门（rig 来自清单，布局门本来就不跑）：harmonise 会按视图缩放遮罩，门是按画面设计的。
+   - 不出 MP4，出 PNG 序列：4:2:0 的有损 MP4 会把三个通道的组互相串色。位深默认 16，`--bit-depth` 给了就按给的。
+   - 尺寸跟着同一组参数走：`--out-format mp4`（默认）时按 `--size`，先按和成片一样的规则决定在哪个尺寸拼
+     （`_master_size`：原生比交付大就按原生拼，否则直接按交付尺寸拼），需要缩小时用 ffmpeg 的 lanczos（swscale，成片
+     编码里用的同一个缩放）缩到 7680 × 3840 或 4096 × 2048，和成片逐像素对齐；`--out-format png`/`exr` 时就是原生母版，
+     和画面的母版一样。
+   - 对遮罩没意义的参数（codec、码率、帧率、插帧、音轨、编码相关）**报一行「遮罩用不上」然后继续**，不拒绝。这是
+     第 10 节「用不上的参数一律拒绝」的例外：用户要的是拿画面的参数就能把它的遮罩一起拼出来。
+   - 输出：`--out` 给的是 `.mp4` 时，去掉扩展名当目录名；没给就按母版的默认目录名。
+   - `MasterJob` 的「母版只能是原生密度」（P5，用户定）对画面照旧；遮罩带一个交付尺寸，拼完再缩，只有这一种情况。
+3. `frame` 遇到遮罩 stem 同样关 harmonise 和门。
+4. GUI：选中遮罩 stem 时日志写一行 ID 和组名，harmonise、重叠门、编码、帧率、插帧、音轨变灰；位深在两种模式下都可选。
+5. 测试：清单读 `id_mattes`（正常、缺省、格式错）；遮罩模式的 CLI（PNG、尺寸、位深、关掉的处理、「用不上」那一行）；GUI。
+   然后重新打包 `dist\VR-Compose`。
+
+**验收**：上游在 Demo_02 上开着自动合成各采一次 8K、4K，遮罩分别是 7680 × 3840 和 4096 × 2048，叠到同一帧 MP4 上
+逐像素对齐；在 GUI 里手动选遮罩 stem 拼出同样的结果。
+
+**落地（2026-11-11）**：
+
+- 代码：`manifest.py`（`IdMatteImage` / `IdMatteChannel`，`Manifest.id_mattes`，`RigChoice.id_matte` 和报告里的
+  `id matte` 一行）；`cli.py`（`cmd_sequence` 遇到遮罩 stem 走 `cmd_master`，那里按上面的规则定尺寸、位深、输出目录，
+  报 `not used`；`frame` 同样关 harmonise 和门）；`pipeline.MasterJob.delivery`（只有遮罩能带，带了才允许非原生宽度，
+  写盘前缩到它）；`encode.resize_lanczos`；GUI（`_id_matte`、`_mode_changed`、`build_command`）。
+- **缩放改成逐通道**：最初照方案把 RGB 一起交给 swscale 的 lanczos，测试发现一张纯色 16 位图缩完三个通道各偏 −1/+2/−2 级，
+  换成平面 RGB（gbrp）也一样，8 位里纯红会往 G、B 漏 4 级 —— 三组遮罩会互相串。现在每个通道当灰度图单独缩
+  （gray16le / gray，三个并行），纯色图缩完分毫不差；一个 10240 宽的通道 0.53 s。成片那一路不变。
+- **`sequence --bit-depth` 的默认值改成「没给」**：原来默认 8，`--bit-depth 8` 和不给分不出来，上游要 8 位遮罩时
+  会拿到 16 位。现在没给时画面的母版仍是 8 位（`MASTER_BIT_DEPTH`），遮罩是 16 位（`pipeline.ID_MATTE_BIT_DEPTH`）。
+- 格式不对的 `id_mattes` 让整份清单放下：上游 2026-11-10（G2）那版清单的 `channels` 是组名字符串，不是 `{id, group}`，
+  拿它拼遮罩会退回按目录数认装配、当画面拼成 MP4。那版只在上游的测试采集里出现过，没交付过。
+- 测试：新增 `tests/test_id_matte.py`（PNG、按 `--size` 缩、比交付尺寸小时直接按交付尺寸拼、png 输出是原生母版、
+  `not used` 一行、缩放保持位深与纯色）、`test_manifest.py` 里 6 个（打了标签 / 画面的 stem / 没有标签 / 三种格式错）、
+  `test_gui.py` 里 1 个。ruff、ruff format、mypy strict 全过；pytest 771 过，5 个失败 6 个 error 全是读本机参考数据的
+  （`E:\360\0904` 的相机目录 11-04 起已经不在，上游 H1 采集的 tile 也不在了），不带这次改动时同样失败。
+- 重新打包：两种形态照 11-11 那次，文件夹版带 CUDA（`--gpu`）1441 MiB，单文件版 225 MiB；各用打出来的 exe 拼上游 K 采集
+  （1024 的 tile）的遮罩一帧 `--size 4k`：都认出标签，4096 × 2048 16 位，`--codec` 列进 `not used`。
+- **验收**（`E:\VR-DEV\Render\VROpPanoramic\G2\E`，上游 Demo_02 / 1v04 第 1033–1037 帧，2560 的 tile，三组）：
+  - 上游自动合成（新包，`bOverlapGate=False` —— 这一段的画面本来就过不了重叠门）：MP4 7680 × 3840 conformance OK；
+    遮罩 7680 × 3840 16 位，报告「stitched at 10240x5120 and resized to the 8k delivery size」、harmonise off、
+    `layout : from manifest`。同一组命令改成 `--size 4k`：MP4 4096 × 2048，遮罩 4096 × 2048。
+  - 对齐：MP4 第 1035 帧的亮度梯度在遮罩边缘上的响应，在 ±2 px 里找最强的位置：珊瑚组（10–25 万个边缘像素）4K 在 (0, 0)，
+    8K 在 (−1, 0)（与 (0, 0) 只差 24.39 对 24.23）；生物组在 (0, 1) / (1, 1)，和边缘标记取「交界后一个像素」的半像素偏向一致；
+    沉船组太小太远，比不出。叠图在 `review\E_overlay_8k_1035_*.png`，边缘贴着轮廓。另外拿 8K 遮罩和上游 G2 那张原生母版
+    用 Pillow 的 lanczos 另缩到 7680 比，平均差 0.015 级。
+  - GUI：在界面里选遮罩 stem（离屏驱动 `ComposeWindow`），日志出 ID 那一行，编码、帧率、harmonise、门变灰，命令只带
+    `--size 8k --bit-depth 16`；跑出来的 5 张和自动合成的**逐字节相同**。
+
+---
+
 ## 未来可做 — 6 相机 rig（用户 2026-09-09：记下，先不做）
 
 **需求**：同一个程序要能处理现在的 20 路装配，也要能处理另一个项目的 **6 路**装配。

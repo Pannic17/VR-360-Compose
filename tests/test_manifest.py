@@ -467,3 +467,76 @@ def test_upstream_s_killed_capture_falls_back_to_the_gate() -> None:
     choice = manifest.choose_rig(found)
     assert choice.set_aside == "state 'rendering': the capture did not finish"
     assert choice.rig is REGISTRY[15]
+
+
+# -- ID matte tags (ROADMAP P17, upstream Part 10) ------------------------------------------
+
+
+def _with_id_mattes(document: Document, stems: list[str]) -> Document:
+    """`document` with one ID matte image holding two groups, R and G, on `stems`."""
+    document["id_mattes"] = {
+        "values": "coverage",
+        "groups": [],
+        "images": [
+            {
+                "name": "IdMatte1",
+                "pass": "PanoramicIdMatte1",
+                "stems": stems,
+                "files": 30,
+                "channels": {
+                    "R": {"id": 1, "group": "Creatures"},
+                    "G": {"id": 2, "group": "Wreck"},
+                    "B": None,
+                },
+            }
+        ],
+    }
+    return document
+
+
+def test_a_stem_the_manifest_tags_as_an_id_matte_is_one(tmp_path: pathlib.Path) -> None:
+    choice = manifest.choose_rig(_capture(tmp_path, _with_id_mattes(_document(), [STEM])))
+    assert choice.manifest is not None and choice.set_aside is None
+    assert choice.id_matte is not None
+    assert choice.id_matte.channels == (
+        manifest.IdMatteChannel("R", 1, "Creatures"),
+        manifest.IdMatteChannel("G", 2, "Wreck"),
+    )
+    assert choice.lines()[-1] == "id matte   : IdMatte1 -- R 1 Creatures, G 2 Wreck"
+
+
+def test_the_picture_s_stem_beside_its_mattes_is_not_one(tmp_path: pathlib.Path) -> None:
+    document = _with_id_mattes(_document(), [f"{STEM}.PanoramicIdMatte1"])
+    choice = manifest.choose_rig(_capture(tmp_path, document))
+    assert choice.manifest is not None and choice.id_matte is None
+    assert len(choice.manifest.id_mattes) == 1
+    assert not any(line.startswith("id matte") for line in choice.lines())
+
+
+def test_a_capture_without_id_groups_has_no_mattes(tmp_path: pathlib.Path) -> None:
+    choice = manifest.choose_rig(_capture(tmp_path, _document()))
+    assert choice.manifest is not None and choice.manifest.id_mattes == ()
+    assert choice.id_matte is None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (_set("id_mattes", "images", value={}), "id_mattes.images is not a list"),
+        (
+            _delete("id_mattes", "images", 0, "channels", "R", "id"),
+            "id_mattes.images[0].channels.R.id is missing",
+        ),
+        (
+            _set("id_mattes", "images", 0, "stems", value="Scene"),
+            "id_mattes.images[0].stems is not a list of strings",
+        ),
+    ],
+)
+def test_malformed_id_matte_tags_set_the_manifest_aside(
+    tmp_path: pathlib.Path, mutate: Callable[[Document], None], reason: str
+) -> None:
+    document = _with_id_mattes(_document(), [STEM])
+    mutate(document)
+    choice = manifest.choose_rig(_capture(tmp_path, document))
+    assert choice.manifest is None and choice.set_aside == reason

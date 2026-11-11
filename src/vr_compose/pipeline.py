@@ -1374,6 +1374,10 @@ MASTER_FORMATS = ("png", "exr")
 """What a master is written as: a lossless PNG, or the 16-bit stitch as a linear
 half-float EXR, from an EXR source only (ROADMAP P15 step 3)."""
 
+ID_MATTE_BIT_DEPTH = 16
+"""An ID matte's PNG depth unless the command says otherwise (ROADMAP P17): its soft edges
+are coverage, and 16 bits keep the resample's fractions below one 8-bit level."""
+
 EXR_MASTER_BYTES_PER_PIXEL = 3.5
 """For the disk precheck of an EXR master, with headroom over the measurement.
 
@@ -1392,7 +1396,8 @@ class MasterJob:
     frames: tuple[int, ...]
     directory: pathlib.Path
     width: int
-    """Master width, 2:1, and it **must** be the source's native density.
+    """Master width, 2:1, and it **must** be the source's native density -- the one
+    exception is an ID matte with a `delivery` size, which follows its picture.
 
     The user's P5 constraint: frame mode outputs at the input's own size and applies no
     compression. Both halves are structural here rather than conventional --
@@ -1460,6 +1465,12 @@ class MasterJob:
     display-referred linear, as half (:func:`vr_compose.exr.half_from_levels16`), so it
     needs `bit_depth` 16 -- and an EXR source: an 8-bit PNG source holds nothing a
     16-bit PNG master does not keep, and the refusal says so."""
+    delivery: tuple[int, int] | None = None
+    """An ID matte's delivery size (ROADMAP P17), the size of the picture it belongs to;
+    None for a master, which stays at the input's own density. With it, `width` is the
+    size :func:`vr_compose.cli._master_size` stitches the picture at, and each frame is
+    resized to `delivery` by :func:`vr_compose.encode.resize_lanczos` when they differ --
+    the scaler the picture's encode uses, so the matte lands on the picture's pixels."""
 
     def __post_init__(self) -> None:
         if not self.frames:
@@ -1491,7 +1502,12 @@ class MasterJob:
         if self.width < 2 or self.width % 2:
             raise ValueError(f"master width must be even and positive, got {self.width}")
         tile = self.source.tile_size
-        if tile is not None and self.width != self.rig.native_width(tile):
+        if self.delivery is not None:
+            if self.out_format != "png":
+                raise ValueError("an ID matte at a delivery size is written as PNG")
+            if self.delivery[0] != 2 * self.delivery[1] or self.delivery[0] % 2:
+                raise ValueError(f"delivery size must be 2:1 and even, got {self.delivery}")
+        elif tile is not None and self.width != self.rig.native_width(tile):
             raise ValueError(
                 f"a master is written at the input's own density: {tile}px tiles give "
                 f"{self.rig.native_width(tile)} wide, not {self.width}. Frame mode has no "
@@ -1629,6 +1645,8 @@ def run_master(
 
     def write_one(frame: int, image: io.Panorama) -> int:
         path = job.frame_path(frame)
+        if job.delivery is not None and job.delivery != (job.width, job.height):
+            image = encode.resize_lanczos(image, *job.delivery)
         if job.out_format == "exr":
             half = exr.half_from_levels16(np.asarray(image, np.uint16))
             return io.write_exr_atomically(path, half, compress_level=job.compress_level)

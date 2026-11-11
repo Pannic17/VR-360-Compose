@@ -158,6 +158,8 @@ class ComposeWindow(QMainWindow):
     def _bind_widgets(self) -> None:
         self._fps_before: str | None = None
         """The frame rate the combo held before interpolation took it over, while it does."""
+        self._id_matte: manifest_mod.IdMatteImage | None = None
+        """The ID matte image the selected stem is, by its manifest; None for a picture."""
         self.status_banner: QLabel = self._child(QLabel, "statusBannerLabel")
         self.source_edit: QLineEdit = self._child(QLineEdit, "sourceLineEdit")
         self.browse_source: QPushButton = self._child(QPushButton, "browseSourceButton")
@@ -295,13 +297,22 @@ class ComposeWindow(QMainWindow):
     def _stem_changed(self, _stem: str = "") -> None:
         chosen = self.selected()
         self.start_button.setEnabled(chosen is not None and self.process is None)
+        self._id_matte = None
         if chosen is None:
             self.progress_detail.setText("—")
+            self._mode_changed()
             return
         try:
             choice = manifest_mod.choose_rig(chosen)
             rig = choice.rig
             self._report_manifest(choice)
+            self._id_matte = choice.id_matte
+            if choice.id_matte is not None:
+                self.bit_depth_combo.setCurrentText(str(pipeline.ID_MATTE_BIT_DEPTH))
+                self.log(
+                    f"这是 ID 遮罩（{choice.id_matte.describe()}）：视频模式按「尺寸」出 PNG 序列，"
+                    "和同尺寸的成片逐像素对齐；帧模式出原生母版。不做 harmonise，不开重叠门。"
+                )
             tile = chosen.tile_size
             native = rig.native_width(tile) if tile else 0
             frames = chosen.frames
@@ -329,6 +340,8 @@ class ComposeWindow(QMainWindow):
             self.log(f"装配不认识：{exc}")
             self.start_button.setEnabled(False)
             self.set_status("fail", "装配未登记")
+        if self.process is None:
+            self._mode_changed()
 
     def _report_manifest(self, choice: manifest_mod.RigChoice) -> None:
         """Say what the capture's manifest decided, and take its frame rate.
@@ -369,10 +382,15 @@ class ComposeWindow(QMainWindow):
         Interpolation (P16) is video-only for the same reason, and it settles the frame
         rate: twice the capture's, which for a delivery means 60. The combo shows that and
         stops being a choice, because the CLI refuses any other `--fps` beside it.
+
+        An ID matte stem (P17) keeps only what its stitch uses: the size in video mode and
+        the bit depth in both; no encoder, frame rate, interpolation, audio, harmonisation
+        or overlap gate.
         """
         video = self.video_radio.isChecked()
+        matte = self._id_matte is not None
+        self.size_combo.setEnabled(video)
         for widget in (
-            self.size_combo,
             self.codec_combo,
             self.bitrate_combo,
             self.audio_edit,
@@ -380,7 +398,9 @@ class ComposeWindow(QMainWindow):
             self.clear_audio,
             self.interpolate_check,
         ):
-            widget.setEnabled(video)
+            widget.setEnabled(video and not matte)
+        self.harmonise_check.setEnabled(not matte)
+        self.gate_combo.setEnabled(not matte)
         interpolating = video and self.interpolate_check.isChecked()
         if interpolating and self._fps_before is None:
             self._fps_before = self.fps_combo.currentText()
@@ -389,8 +409,8 @@ class ComposeWindow(QMainWindow):
             # unticked again: the rate that was chosen before comes back
             self.fps_combo.setCurrentText(self._fps_before)
             self._fps_before = None
-        self.fps_combo.setEnabled(video and not interpolating)
-        self.bit_depth_combo.setEnabled(not video)
+        self.fps_combo.setEnabled(video and not interpolating and not matte)
+        self.bit_depth_combo.setEnabled(not video or matte)
 
     # --- browsing ---------------------------------------------------------------------
 
@@ -468,7 +488,16 @@ class ComposeWindow(QMainWindow):
             argv += ["--gate", self.gate_combo.currentText()]
         if self.layout_gate_combo.currentText() != layout.DEFAULT_LAYOUT_GATE:
             argv += ["--layout-gate", self.layout_gate_combo.currentText()]
-        if video:
+        if video and self._id_matte is not None:
+            # The CLI stitches a matte stem as a PNG sequence at this size by itself; the
+            # encoder, rate and audio would only be named as unused.
+            argv += [
+                "--size",
+                self.size_combo.currentText(),
+                "--bit-depth",
+                self.bit_depth_combo.currentText(),
+            ]
+        elif video:
             argv += [
                 "--size",
                 self.size_combo.currentText(),

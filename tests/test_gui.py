@@ -851,3 +851,38 @@ def test_the_finish_line_says_what_interpolation_delivered(qt_app: QApplication)
         assert "插帧：600 帧拼接，交付 1200 帧（rife-ncnn-vulkan rife-v4.6" in text
     finally:
         window.close()
+
+
+def test_an_id_matte_stem_keeps_only_what_its_stitch_uses(
+    qt_app: QApplication, tmp_path: pathlib.Path
+) -> None:
+    """P17: the CLI stitches a matte stem at the chosen size itself; the GUI sends that and
+    the bit depth, and greys out the encoder, rate, audio, harmonise and gate."""
+    from test_id_matte import STEM, _matte_capture
+
+    _matte_capture(tmp_path / "src")
+    window = ComposeWindow()
+    try:
+        window.source_edit.setText(str(tmp_path / "src"))
+        window.discover()
+        assert window.selected() is not None and window.selected().stem == STEM  # type: ignore[union-attr]
+        window.video_radio.setChecked(True)
+        argv = window.build_command()
+        assert argv is not None
+        assert argv[argv.index("--size") + 1] == window.size_combo.currentText()
+        assert argv[argv.index("--bit-depth") + 1] == str(pipeline.ID_MATTE_BIT_DEPTH)
+        for absent in ("--codec", "--bitrate", "--fps", "--interpolate", "--audio"):
+            assert absent not in argv, absent
+        assert window.size_combo.isEnabled() and window.bit_depth_combo.isEnabled()
+        for greyed in (
+            window.codec_combo,
+            window.bitrate_combo,
+            window.fps_combo,
+            window.interpolate_check,
+            window.harmonise_check,
+            window.gate_combo,
+        ):
+            assert not greyed.isEnabled(), greyed.objectName()
+        assert "这是 ID 遮罩（IdMatte1 -- R 1 Creatures" in window.log_edit.toPlainText()
+    finally:
+        window.close()
