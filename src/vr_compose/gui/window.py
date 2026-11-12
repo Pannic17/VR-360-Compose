@@ -311,7 +311,8 @@ class ComposeWindow(QMainWindow):
                 self.bit_depth_combo.setCurrentText(str(pipeline.ID_MATTE_BIT_DEPTH))
                 self.log(
                     f"这是 ID 遮罩（{choice.id_matte.describe()}）：视频模式按「尺寸」出 PNG 序列，"
-                    "和同尺寸的成片逐像素对齐；帧模式出原生母版。不做 harmonise，不开重叠门。"
+                    "旁边再出一份同尺寸的 ProRes 4444 .mov 给调色用，都和同尺寸的成片逐像素对齐；"
+                    "帧模式出原生母版。不做 harmonise，不开重叠门。"
                 )
             tile = chosen.tile_size
             native = rig.native_width(tile) if tile else 0
@@ -383,9 +384,9 @@ class ComposeWindow(QMainWindow):
         rate: twice the capture's, which for a delivery means 60. The combo shows that and
         stops being a choice, because the CLI refuses any other `--fps` beside it.
 
-        An ID matte stem (P17) keeps only what its stitch uses: the size in video mode and
-        the bit depth in both; no encoder, frame rate, interpolation, audio, harmonisation
-        or overlap gate.
+        An ID matte stem (P17) keeps only what its stitch uses: the size and the frame rate
+        of its ProRes copy in video mode and the bit depth in both; no encoder,
+        interpolation, audio, harmonisation or overlap gate.
         """
         video = self.video_radio.isChecked()
         matte = self._id_matte is not None
@@ -409,7 +410,7 @@ class ComposeWindow(QMainWindow):
             # unticked again: the rate that was chosen before comes back
             self.fps_combo.setCurrentText(self._fps_before)
             self._fps_before = None
-        self.fps_combo.setEnabled(video and not interpolating and not matte)
+        self.fps_combo.setEnabled(video and not interpolating)
         self.bit_depth_combo.setEnabled(not video or matte)
 
     # --- browsing ---------------------------------------------------------------------
@@ -489,14 +490,18 @@ class ComposeWindow(QMainWindow):
         if self.layout_gate_combo.currentText() != layout.DEFAULT_LAYOUT_GATE:
             argv += ["--layout-gate", self.layout_gate_combo.currentText()]
         if video and self._id_matte is not None:
-            # The CLI stitches a matte stem as a PNG sequence at this size by itself; the
-            # encoder, rate and audio would only be named as unused.
+            # The CLI stitches a matte stem as a PNG sequence at this size by itself, with a
+            # ProRes copy at the frame rate; the encoder and audio would only be named as
+            # unused. An interpolated picture has frames a matte cannot follow, so then the
+            # copy keeps the capture's own rate.
             argv += [
                 "--size",
                 self.size_combo.currentText(),
                 "--bit-depth",
                 self.bit_depth_combo.currentText(),
             ]
+            if not self.interpolate_check.isChecked():
+                argv += ["--fps", self.fps_combo.currentText()]
         elif video:
             argv += [
                 "--size",

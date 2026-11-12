@@ -856,8 +856,9 @@ def test_the_finish_line_says_what_interpolation_delivered(qt_app: QApplication)
 def test_an_id_matte_stem_keeps_only_what_its_stitch_uses(
     qt_app: QApplication, tmp_path: pathlib.Path
 ) -> None:
-    """P17: the CLI stitches a matte stem at the chosen size itself; the GUI sends that and
-    the bit depth, and greys out the encoder, rate, audio, harmonise and gate."""
+    """P17: the CLI stitches a matte stem at the chosen size itself; the GUI sends that, the
+    bit depth and the ProRes copy's frame rate, and greys out the encoder, interpolation,
+    audio, harmonise and gate."""
     from test_id_matte import STEM, _matte_capture
 
     _matte_capture(tmp_path / "src")
@@ -871,13 +872,14 @@ def test_an_id_matte_stem_keeps_only_what_its_stitch_uses(
         assert argv is not None
         assert argv[argv.index("--size") + 1] == window.size_combo.currentText()
         assert argv[argv.index("--bit-depth") + 1] == str(pipeline.ID_MATTE_BIT_DEPTH)
-        for absent in ("--codec", "--bitrate", "--fps", "--interpolate", "--audio"):
+        assert argv[argv.index("--fps") + 1] == window.fps_combo.currentText()
+        for absent in ("--codec", "--bitrate", "--interpolate", "--audio"):
             assert absent not in argv, absent
         assert window.size_combo.isEnabled() and window.bit_depth_combo.isEnabled()
+        assert window.fps_combo.isEnabled()
         for greyed in (
             window.codec_combo,
             window.bitrate_combo,
-            window.fps_combo,
             window.interpolate_check,
             window.harmonise_check,
             window.gate_combo,

@@ -19,6 +19,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import dataclasses
+import fractions
 import itertools
 import json
 import pathlib
@@ -47,6 +48,7 @@ __all__ = [
     "find_tools",
     "resize_lanczos",
     "select_level",
+    "write_prores_matte",
 ]
 
 SIZES: dict[str, tuple[int, int]] = {"8k": (7680, 3840), "4k": (4096, 2048)}
@@ -205,6 +207,60 @@ def resize_lanczos(
     if deep:
         return np.stack(planes, axis=-1).astype(np.uint16)
     return np.stack(planes, axis=-1).astype(np.uint8)
+
+
+def write_prores_matte(
+    pngs: list[pathlib.Path], output: pathlib.Path, fps: fractions.Fraction | int
+) -> int:
+    """Encode an ID matte's PNG sequence as ProRes 4444 into `output` (a `.mov`); returns
+    its size in bytes (ROADMAP P17).
+
+    4:4:4 Y'CbCr from a 10-bit conversion, BT.709 and video range, tagged as the delivery
+    MP4 is: what a
+    grading tool plays in real time and reads back to RGB, without the chroma decimation
+    that would bleed one group into another. The PNGs stay the lossless master. Written
+    through a temporary file, so a reader never meets half of one.
+
+    The quantiser is pinned at 1. The encoder's own rate control spends its bits on the
+    flat areas and quantises the hard 0/1 edges coarsely: on an 8K Demo_02 matte that rang
+    up to 100 levels at an edge and leaked 40 into a neighbouring group's channel, against
+    3 and 1.2 at quantiser 1, for the same size (ROADMAP P17).
+    """
+    ffmpeg = _locate("ffmpeg")
+    if ffmpeg is None:
+        raise FfmpegNotFound("ffmpeg was not found next to the executable or on PATH")
+    if not pngs:
+        raise ValueError("no matte frames to encode")
+    rate = fractions.Fraction(fps)
+    partial = output.with_name(output.name + ".partial")
+    command = [
+        str(ffmpeg), "-hide_banner", "-v", "error", "-y",
+        "-f", "image2pipe", "-framerate", f"{rate.numerator}/{rate.denominator}",
+        "-c:v", "png", "-i", "pipe:0",
+        "-vf", "scale=out_color_matrix=bt709:out_range=limited,format=yuv444p10le",
+        "-c:v", "prores_ks", "-profile:v", "4", "-q:v", "1", "-vendor", "apl0",
+        "-pix_fmt", "yuv444p10le",
+        *COLOUR_ARGS, "-color_range", "tv", "-an", "-f", "mov", str(partial),
+    ]  # fmt: skip
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=child_creation_flags(),
+    )
+    assert process.stdin is not None and process.stderr is not None
+    try:
+        for png in pngs:
+            process.stdin.write(png.read_bytes())
+        process.stdin.close()
+    except BrokenPipeError:
+        pass
+    message = process.stderr.read().decode("utf-8", "replace").strip()
+    if process.wait() != 0:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg could not encode the ProRes matte {output}: {message}")
+    partial.replace(output)
+    return output.stat().st_size
 
 
 def find_tools() -> Tools:

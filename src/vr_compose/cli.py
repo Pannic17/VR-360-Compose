@@ -483,8 +483,12 @@ ID_MATTE_UNUSED = (
     *(name for name in DELIVERY_ONLY if name not in ("size", "stitch_at")),
     "preset",
 )
-"""`sequence` options an ID matte has no use for whatever the output: it is a PNG sequence
-of coverage, with no encoder, frame rate, interpolation or audio (ROADMAP P17)."""
+"""`sequence` options an ID matte has no use for: it is a PNG sequence of coverage, with no
+encoder, interpolation or audio (ROADMAP P17). `--fps` is among them unless the matte's
+ProRes copy is written, which plays at it."""
+
+MATTE_ONLY = ("no_matte_prores",)
+"""`sequence` options that only mean something for an ID matte stem."""
 
 
 def _given(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -525,7 +529,8 @@ def cmd_master(
 
     An ID matte (ROADMAP P17) follows the options its picture would be stitched with: with
     `--out-format mp4` it is a PNG sequence at `--size`, stitched where the picture is and
-    resized by the picture's scaler; with png or exr it is the native master. It is never
+    resized by the picture's scaler, plus a ProRes 4444 copy of it at the picture's frame
+    rate unless `--no-matte-prores`; with png or exr it is the native master. It is never
     harmonised or gated, and the options it has no use for are named and passed over, so
     the picture's own command line composes its matte.
     """
@@ -545,12 +550,17 @@ def cmd_master(
     delivery: tuple[int, int] | None = None
     output = args.out
     unused: list[str] = []
+    prores = matte is not None and args.out_format == "mp4" and not args.no_matte_prores
+    fps, fps_line = _delivery_fps(args.fps, choice.rate) if prores else (DEFAULT_FPS, None)
     if matte is None:
         _reject_inapplicable(
             args,
             DELIVERY_ONLY,
             "only apply to --out-format mp4. A master has no codec, bitrate, frame rate "
             "or delivery size to choose: it is the source's own density, losslessly.",
+        )
+        _reject_inapplicable(
+            args, MATTE_ONLY, "only applies to an ID matte stem, which its manifest tags."
         )
     if args.out_format == "exr":
         _reject_inapplicable(
@@ -560,9 +570,13 @@ def cmd_master(
             "written as linear half-float.",
         )
     if matte is not None:
-        unused = _given(
-            args, ID_MATTE_UNUSED + (() if args.out_format == "mp4" else ("size", "stitch_at"))
-        )
+        unused = [
+            name
+            for name in _given(
+                args, ID_MATTE_UNUSED + (() if args.out_format == "mp4" else ("size", "stitch_at"))
+            )
+            if not (prores and name == "fps")
+        ]
         if args.out_format == "mp4":
             out_format = "png"
             delivery = encode.SIZES[args.size]
@@ -632,6 +646,14 @@ def cmd_master(
         f"sampler {job.sampler}"
     )
     report.say(f"output     : {job.directory}")
+    mov = job.directory.parent / f"{job.directory.name}.mov"
+    if prores:
+        if fps_line is not None:
+            report.say(fps_line)
+        report.say(
+            f"matte mov  : {mov.name}, ProRes 4444 (4:4:4) at {fps} fps, after the PNGs "
+            "(--no-matte-prores skips it)"
+        )
     report.event(
         "start",
         mode="frames",
@@ -711,6 +733,18 @@ def cmd_master(
         bar.close()
 
     report.say(f"\ndone       : {summary.written} master(s) -> {summary.directory}")
+    if prores:
+        try:
+            size = encode.write_prores_matte(
+                [job.frame_path(frame) for frame in job.frames], mov, fps
+            )
+        except (RuntimeError, encode.FfmpegNotFound) as exc:
+            report.event("error", kind="failure", message=str(exc))
+            raise SystemExit(str(exc)) from None
+        report.say(
+            f"matte mov  : {len(job.frames)} frame(s) -> {mov} ({size / 2**20:.0f} MiB), "
+            f"ProRes 4444 (4:4:4), {fps} fps"
+        )
     if summary.written:
         report.say(
             f"throughput : {summary.seconds_per_frame:.2f} s/frame, "
@@ -771,6 +805,9 @@ def cmd_sequence(args: argparse.Namespace) -> int:
         return cmd_master(args, chosen, choice, frames, stamp)
     _reject_inapplicable(
         args, MASTER_ONLY, "only apply to --out-format png/exr; an MP4 is not a frame sequence."
+    )
+    _reject_inapplicable(
+        args, MATTE_ONLY, "only applies to an ID matte stem, which its manifest tags."
     )
     if args.audio is None:
         _reject_inapplicable(args, AUDIO_FORMAT, "only apply with --audio.")
@@ -1277,6 +1314,12 @@ def build_parser() -> argparse.ArgumentParser:
         "(with --audio)",
     )
     sequence.add_argument("--no-resume", action="store_true", help="re-encode finished segments")
+    sequence.add_argument(
+        "--no-matte-prores",
+        action="store_true",
+        help="an ID matte stem at a delivery size writes only its PNG sequence, not the ProRes "
+        "4444 copy beside it (ID matte stems only, ROADMAP P17)",
+    )
     sequence.add_argument("--keep-segments", action="store_true")
     sequence.add_argument(
         "--compress-level",
@@ -1309,7 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_sequence,
         option_defaults={
             name: sequence.get_default(name)
-            for name in (*DELIVERY_ONLY, *MASTER_ONLY, *ID_MATTE_UNUSED)
+            for name in (*DELIVERY_ONLY, *MASTER_ONLY, *ID_MATTE_UNUSED, *MATTE_ONLY)
         },
     )
     return parser
