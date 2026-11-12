@@ -3,7 +3,7 @@
 给在本仓库工作的 AI agent 与新同事的上下文文件。**先读完本文件再动手。**
 路线图与阶段目标见 [ROADMAP.md](ROADMAP.md)。
 **上游（UE 侧）**2026-09-09 时不可修改，2026-09-21 起换成自研的 UE 插件 VROpPanoramic，可以改了。
-只有上游能解决的上限、以及它们在上游 ROADMAP 里的进度，单独记在 [UPSTREAM.md](UPSTREAM.md) ——
+只有上游能解决的上限、以及它们在上游 ROADMAP 里的进度，单独记在 [UPSTREAM.md](D:/VR-DEV/VR-Docs/VR-Panoramic/Docs/UPSTREAM.md) ——
 上游把它当需求文档引用；它不是我们的计划。
 
 ---
@@ -339,7 +339,7 @@ tile 直接出局，剩下的线性淡入；`band → 0` 就是赢家通吃。
 
 **这一条同时封死了下游的所有路**：视差要么靠上游共节点重渲，要么靠带深度/光流的拼接器，
 而后者与 §1「静态重采样、不做光流」是冲突的设计决策。混合参数只能选择
-「糊一点」还是「糊得更显眼一点」，选不出「不糊」。上游的诉求见 [UPSTREAM.md](UPSTREAM.md) 第 7 条。
+「糊一点」还是「糊得更显眼一点」，选不出「不糊」。上游的诉求见 [UPSTREAM.md](D:/VR-DEV/VR-Docs/VR-Panoramic/Docs/UPSTREAM.md) 第 7 条。
 
 ---
 
@@ -955,8 +955,11 @@ GUI 只选文件，用默认格式。不另开给成品补音轨的命令（用�
 
 ### 清单（上游 H1，2026-11-03）
 
+> 两边的约定（目录与文件命名、清单的合同字段、已知缺口）汇总在任务级文档
+> `D:\VR-DEV\VR-Docs\VR-Panoramic\Docs\Handoff_Contract.md`；本节是我们这一侧读清单的细则。
+
 VROpPanoramic 每次采集在输出目录、与 `Camera01..15` 同级写 `vrop_panoramic_manifest.json`
-（字段表在上游 `MANUAL.md`「清单」）。`vr_compose.manifest.choose_rig` 决定 rig，三种结果（用户 2026-11-03 定，
+（字段表在上面那份 `Handoff_Contract.md` 的 §2）。`vr_compose.manifest.choose_rig` 决定 rig，三种结果（用户 2026-11-03 定，
 取代 10-08 的「15 路必须带清单」）：
 
 | 结果 | 条件 | 做法 |
@@ -1978,7 +1981,7 @@ GPL 许可问题用户明确决定不处理（非商业软件）；
 
 | | 确认的事 | 直接后果 |
 |---|---|---|
-| 1 | **上游不可修改**（2026-09-21 起不再成立：上游换成自研 VROpPanoramic） | 上游那三项搬去 [UPSTREAM.md](UPSTREAM.md)，ROADMAP 不再收录；~~8-bit 是永久天花板~~ 上游 A4 插件侧 2026-10-15 能输出 EXR（默认仍是 PNG），我们 P15 第一步 2026-10-16 读得了：EXR 源走现有管线，上游何时改默认由用户定 |
+| 1 | **上游不可修改**（2026-09-21 起不再成立：上游换成自研 VROpPanoramic） | 上游那三项搬去 [UPSTREAM.md](D:/VR-DEV/VR-Docs/VR-Panoramic/Docs/UPSTREAM.md)，ROADMAP 不再收录；~~8-bit 是永久天花板~~ 上游 A4 插件侧 2026-10-15 能输出 EXR（默认仍是 PNG），我们 P15 第一步 2026-10-16 读得了：EXR 源走现有管线，上游何时改默认由用户定 |
 | 2 | 硬编码来源路径**不算风险** | 约束 3 的规则照旧（代码已干净），只是不再当风险跟踪 |
 | 3 | **分发包大小不重要** | 体积不再是形态、依赖、GPU 方案的判据 |
 | 4 | **目标头显可以播 8K H.264** | 8K + H.264 是可交付默认；`--size 4k` 降为「想要小文件」的选项 |

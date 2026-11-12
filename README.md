@@ -9,7 +9,7 @@
 输出命名与帧模式、GUI、交付合规与色彩管线、打包 exe）。
 **只剩两件验收**：打包版跑完整一版 + 真机播放看一眼亮度；干净机器上解压即跑。
 阶段目标与所有实测数字见 [ROADMAP.md](ROADMAP.md)；
-上游（UE 侧）2026-09-21 起换成自研插件 VROpPanoramic，可以改了；只有上游能解决的上限及其在上游的进度记在 [UPSTREAM.md](UPSTREAM.md)。
+上游（UE 侧）2026-09-21 起换成自研插件 VROpPanoramic，可以改了；只有上游能解决的上限及其在上游的进度记在 [UPSTREAM.md](D:/VR-DEV/VR-Docs/VR-Panoramic/Docs/UPSTREAM.md)。
 
 ---
 

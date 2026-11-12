@@ -6,7 +6,7 @@ Three things this layer deliberately does:
   quarter of each file carries no information (AGENTS.md §4). Nothing downstream should
   ever see a fourth channel.
 * **Reads an EXR as sRGB levels, not linear.** The upstream EXR is the PNG's image before
-  its sRGB encode and 8-bit dither (UPSTREAM.md item 3), so encoding on read gives the
+  its sRGB encode and 8-bit dither (item 3 of the upstream limits), so encoding on read gives the
   pipeline the quantity it already works in, as float32 and without the quantisation
   (:mod:`vr_compose.exr`, ROADMAP P15 step 1).
 * **Writes RGB, not RGBA.** The reference output has alpha 253..255 -- rounding debris
